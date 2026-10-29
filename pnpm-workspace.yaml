@@ -1,0 +1,8 @@
+allowBuilds:
+  workerd: true
+minimumReleaseAgeExclude:
+  - "@cloudflare/build-output-utils@0.9.6"
+  - "@cloudflare/config@0.29.0"
+  - "@cloudflare/runtime-types@0.1.18"
+  - "@cloudflare/vite-plugin@2.0.0-beta.v.7"
+  - miniflare@5.20261023.2-beta

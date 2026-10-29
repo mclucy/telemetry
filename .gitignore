@@ -22,3 +22,17 @@ rustc-ice-*.txt
 #  and can be added to the global gitignore or merged into this file.  For a more nuclear
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
+
+# Generated Cloudflare build artifacts and dependencies
+.cloudflare/
+build/
+node_modules/
+test_*/
+
+# Deployment inputs that must never be committed
+.secrets.json
+.env
+.env.*
+!.env.example
+deploy/*.local.*
+.retrieval-token

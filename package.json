@@ -1,0 +1,29 @@
+{
+  "name": "lucy-telemetry-worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "cargo check --target wasm32-unknown-unknown",
+    "fmt": "cargo fmt --all",
+    "build:staging": "worker-build --release && cf build --mode staging",
+    "build:production": "worker-build --release && cf build --mode production",
+    "deploy-check:staging": "cf deploy --prebuilt --mode staging --dry-run --provision=false",
+    "deploy-check:production": "cf deploy --prebuilt --mode production --dry-run --provision=false",
+    "deploy:staging": "cf deploy --prebuilt --mode staging --secrets-file .secrets.json --provision=false",
+    "deploy:production": "cf deploy --prebuilt --mode production --secrets-file .secrets.json --provision=false",
+    "triggers:staging": "cf workers triggers deploy --prebuilt --mode staging",
+    "triggers:production": "cf workers triggers deploy --prebuilt --mode production",
+    "migrate": "cf d1 migrations apply \"$LUCY_TELEMETRY_D1_ID\" --dir migrations"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "2.0.0-beta.v.7",
+    "@types/node": "^26.6.5",
+    "cf": "1.0.0-beta.24",
+    "vite": "npm:@voidzero-dev/vite-plus-core@1.4.0",
+    "vite-plus": "1.4.0"
+  },
+  "overrides": {
+    "vite": "npm:@voidzero-dev/vite-plus-core@1.4.0"
+  },
+  "packageManager": "pnpm@12.16.1"
+}

@@ -1,0 +1,21 @@
+{
+  "name": "Lucy telemetry admin",
+  "domain": "telemetry-admin.example.com/v1",
+  "type": "self_hosted",
+  "session_duration": "8h",
+  "app_launcher_visible": false,
+  "auto_redirect_to_identity": false,
+  "policies": [
+    {
+      "name": "Admin service token only",
+      "decision": "non_identity",
+      "include": [
+        {
+          "service_token": {
+            "token_id": "REPLACE_WITH_ACCESS_SERVICE_TOKEN_ID"
+          }
+        }
+      ]
+    }
+  ]
+}

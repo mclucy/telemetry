@@ -1,0 +1,17 @@
+{
+  "rules": [
+    {
+      "id": "expire-lucy-report-bodies",
+      "enabled": true,
+      "conditions": {
+        "prefix": "reports/"
+      },
+      "deleteObjectsTransition": {
+        "condition": {
+          "type": "Age",
+          "maxAge": 1209600
+        }
+      }
+    }
+  ]
+}
