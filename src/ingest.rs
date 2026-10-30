@@ -4,7 +4,10 @@ use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, TimeDelta, Utc};
 use serde::Serialize;
-use worker::{console_error, Env, Request, Response};
+use worker::{
+    console_error, wasm_bindgen::JsValue, Env, QueueContentType, RawMessageBuilder, Request,
+    Response, SendMessage,
+};
 
 use crate::config::Config;
 use crate::models::{validate_event, validate_report, QueueMessage, ReportRecord, ValidatedReport};
@@ -657,32 +660,34 @@ async fn delete_uploaded_body(env: &Env, r2_key: &str) {
 
 async fn send_queue(env: &Env, prepared: &[Prepared]) -> std::result::Result<(), ()> {
     let queue = env.queue("RECORDS").map_err(|_| ())?;
-    let mut chunk: Vec<QueueMessage> = Vec::new();
+    let mut chunk: Vec<SendMessage<JsValue>> = Vec::new();
     let mut chunk_bytes = 0usize;
 
     for item in prepared {
-        let message_bytes = serde_json::to_vec(&item.message)
-            .map_err(|_| ())?
-            .len()
-            .saturating_add(64);
+        let encoded = serde_json::to_string(&item.message).map_err(|_| ())?;
+        let message_bytes = encoded.len().saturating_add(64);
 
         if !chunk.is_empty()
             && (chunk.len() >= 100
                 || chunk_bytes.saturating_add(message_bytes) > MAX_QUEUE_BATCH_BYTES)
         {
             queue
-                .send_batch(std::mem::take(&mut chunk))
+                .send_raw_batch(std::mem::take(&mut chunk))
                 .await
                 .map_err(|_| ())?;
             chunk_bytes = 0;
         }
 
-        chunk.push(item.message.clone());
+        // Queue content is JSON. serde_wasm_bindgen maps nested JSON objects to
+        // JS Maps, which JSON serialization writes as {}, so the body is parsed
+        // from its JSON text instead of serializing the Rust message directly.
+        let body = worker::js_sys::JSON::parse(&encoded).map_err(|_| ())?;
+        chunk.push(RawMessageBuilder::new(body).build_with_content_type(QueueContentType::Json));
         chunk_bytes = chunk_bytes.saturating_add(message_bytes);
     }
 
     if !chunk.is_empty() {
-        queue.send_batch(chunk).await.map_err(|_| ())?;
+        queue.send_raw_batch(chunk).await.map_err(|_| ())?;
     }
     Ok(())
 }
