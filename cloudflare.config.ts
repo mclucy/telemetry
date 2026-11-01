@@ -1,8 +1,12 @@
 import process from "node:process";
 import { bindings, defineConfig, triggers } from "cf/config";
 
+const accountId = "f4e323f273bab9cb104cbe7b945c58d3";
+const productionDatabaseId = "c29de72a-8458-4fdb-8619-243acae0d864";
+
 export default defineConfig(({ mode }) => {
-  const environment = mode ?? "staging";
+  // Vite evaluates the config in `development` mode, which serves the staging profile.
+  const environment = mode === undefined || mode === "development" ? "staging" : mode;
   if (environment !== "staging" && environment !== "production") {
     throw new Error("Select the staging or production mode.");
   }
@@ -14,20 +18,22 @@ export default defineConfig(({ mode }) => {
   const adminHost = production ? "telemetry-admin.lucy.lc" : undefined;
 
   return {
+    accountId,
     worker: {
       name,
       entrypoint: "./build/index.js",
       compatibilityDate: "2026-10-01",
       workersDev: !production,
       previewUrls: false,
-      domains: production
-        ? [
-            { hostname: "telemetry.lucy.lc", production: true, previews: false },
-            { hostname: adminHost!, production: true, previews: false },
-          ]
-        : [],
+      domains:
+        adminHost === undefined
+          ? []
+          : [
+              { hostname: "telemetry.lucy.lc", production: true, previews: false },
+              { hostname: adminHost, production: true, previews: false },
+            ],
       env: {
-        DB: bindings.d1({ name, id: process.env.LUCY_TELEMETRY_D1_ID }),
+        DB: bindings.d1({ name, id: production ? productionDatabaseId : undefined }),
         REPORTS: bindings.r2({ name }),
         RECORDS: bindings.queue({ name }),
         CONFIG_JSON: bindings.text(JSON.stringify({ environment, admin_host: adminHost })),
