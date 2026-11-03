@@ -1,6 +1,6 @@
 # Lucy telemetry backend
 
-Cloudflare Worker backend for lucy's telemetry service. Rust (`workers-rs`), D1, R2, Queues, and a scheduled cleanup job. The repository is self-contained: one Worker serves ingestion, the queue consumer, retention cleanup, and authenticated operator retrieval.
+Cloudflare Worker backend for lucy's telemetry service. Rust (`workers-rs`), D1, R2, Queues, and a scheduled cleanup job. The repository is self-contained: one Worker serves ingestion, the queue consumer, and retention cleanup.
 
 ## Request flow
 
@@ -27,9 +27,9 @@ Scheduled cleanup (hourly)
 
 ## HTTP API
 
-All responses set `cache-control: no-store`. Ingestion is public; retrieval is private.
+All responses set `cache-control: no-store`.
 
-Production ingestion uses `https://telemetry.lucy.lc`, separate from the Access-protected admin hostname. Staging uses its `workers.dev` URL.
+Production ingestion uses `https://telemetry.lucy.lc`. Staging uses its `workers.dev` URL.
 
 ### `GET /health`
 
@@ -139,85 +139,45 @@ Acceptance semantics: an event is accepted after its queue message is durably se
 
 Duplicate IDs are idempotent. A repeated event ID does not create a second row. A stored report with the same body digest is accepted without rewriting R2; a pending retry may rewrite the same body. A different digest returns `report_conflict`.
 
-### Private retrieval
-
-Every route below requires `Authorization: Bearer <RETRIEVAL_TOKEN>`. It is a second factor behind Cloudflare Access; Access is required for production admin access. Unauthorized requests receive `401` with `WWW-Authenticate`.
-
-| route                                            | response                                          |
-| ------------------------------------------------ | ------------------------------------------------- |
-| `GET /v1/events?limit=&cursor=&installation_id=` | event metadata, newest first; max limit 200       |
-| `GET /v1/events/<id>`                            | one event and its context snapshots               |
-| `GET /v1/reports?limit=&cursor=&kind=`           | report metadata, newest first; no bodies          |
-| `GET /v1/reports/<id>`                           | report metadata including `state` and `stored_at` |
-| `GET /v1/reports/<id>/body`                      | stored report body as `text/plain; charset=utf-8` |
-| `GET /v1/stats`                                  | aggregate counts and byte totals                  |
-
-List responses are ordered by `received_at DESC, id DESC`. The `id` tie-breaker is required because one ingestion request can produce several rows with the same millisecond `received_at`; a timestamp-only cursor would silently skip those rows. Request the next page with the opaque `next_cursor` value from the previous response:
-
-```sh
-curl -fsS -H "Authorization: Bearer $RETRIEVAL_TOKEN" \
-  "https://$WORKER_DOMAIN/v1/events?limit=50"
-# subsequent page; let curl handle the reserved characters
-curl -fsS -H "Authorization: Bearer $RETRIEVAL_TOKEN" \
-  --get --data-urlencode "limit=50" --data-urlencode "cursor=$NEXT_CURSOR" \
-  "https://$WORKER_DOMAIN/v1/events"
-```
-
-A cursor encodes the last returned `(received_at, id)` pair and is not a timestamp: pass it back unchanged rather than constructing one. Both parts are validated and normalized; a malformed cursor returns `400 invalid_cursor`. `next_cursor` is present only when another page exists.
-
-Retrieval only exposes data inside its retention window: events must be at or after the event cutoff, and reports must be at or after the report cutoff and must not be `deleting`. Expired events, expired or `deleting` reports, and their bodies return `404 not_found`. A `410 body_expired` means the metadata is still retained but the R2 object has already been removed by the lifecycle backstop or a partially completed cleanup.
-
-`/v1/stats` distinguishes:
-
-- `accepted_event_payload_bytes` and `accepted_report_payload_bytes` — compact logical JSON payload sizes at acceptance, not wire/TLS/HTTP bytes;
-- `accepted_total_logical_bytes` — the sum of those two, not exact usage;
-- `report_body_bytes` — stored report body bytes;
-- event/context/report/pending-report counts, restricted to rows inside the configured retention windows;
-- `period_start` / `period_end` — earliest/latest `received_at` in retained data.
-
-The Worker cannot observe Queue depth. `queue.status` is `not_observed_by_worker` by design; use `cf queues metrics get <queue-id>` or the dashboard for backlog. Client-side queue status is local to the client.
-
 ## Limits and configuration
 
 The deployment writes one `CONFIG_JSON` text binding. Missing configuration uses the safe defaults below. Malformed or out-of-range configuration fails closed with `500 not_configured` rather than silently clamping.
 
-| field                        | default   | accepted range                                           |
-| ---------------------------- | --------- | -------------------------------------------------------- |
-| `environment`                | `unknown` | 1–64 bytes                                               |
-| `admin_host`                 | unset     | bare hostname for admin routes; unset disables retrieval |
-| `max_request_bytes`          | 262144    | 1024–1048576                                             |
-| `max_records`                | 50        | 1–100                                                    |
-| `max_record_bytes`           | 98304     | 1024–122880                                              |
-| `max_report_body_bytes`      | 65536     | 1–`max_record_bytes`                                     |
-| `max_context_bytes`          | 8192      | 0–32768                                                  |
-| `max_contexts`               | 16        | 1–32                                                     |
-| `event_retention_days`       | 30        | 1–30 (hard privacy ceiling)                              |
-| `report_retention_days`      | 14        | 1–14 (hard privacy ceiling)                              |
-| `pending_report_grace_hours` | 336       | must equal `report_retention_days * 24` (24–336)         |
-| `cleanup_batch_size`         | 100       | 1–500                                                    |
-| `cleanup_max_batches`        | 10        | 1–100                                                    |
-| `max_clock_skew_seconds`     | 604800    | 0–2592000                                                |
+| field                        | default   | accepted range                                   |
+| ---------------------------- | --------- | ------------------------------------------------ |
+| `environment`                | `unknown` | 1–64 bytes                                       |
+| `max_request_bytes`          | 262144    | 1024–1048576                                     |
+| `max_records`                | 50        | 1–100                                            |
+| `max_record_bytes`           | 98304     | 1024–122880                                      |
+| `max_report_body_bytes`      | 65536     | 1–`max_record_bytes`                             |
+| `max_context_bytes`          | 8192      | 0–32768                                          |
+| `max_contexts`               | 16        | 1–32                                             |
+| `event_retention_days`       | 30        | 1–30 (hard privacy ceiling)                      |
+| `report_retention_days`      | 14        | 1–14 (hard privacy ceiling)                      |
+| `pending_report_grace_hours` | 336       | must equal `report_retention_days * 24` (24–336) |
+| `cleanup_batch_size`         | 100       | 1–500                                            |
+| `cleanup_max_batches`        | 10        | 1–100                                            |
+| `max_clock_skew_seconds`     | 604800    | 0–2592000                                        |
 
 `max_record_bytes` includes the record envelope (`id`, `type`, `payload`) and is measured as compact JSON. Queue messages are independently checked against the Cloudflare Queues per-message ceiling before they are sent.
 
 ## Bindings
 
-| binding           | type           | purpose                                    |
-| ----------------- | -------------- | ------------------------------------------ |
-| `DB`              | D1             | events, context snapshots, report metadata |
-| `REPORTS`         | R2             | private report body storage                |
-| `RECORDS`         | Queue producer | event payloads and report metadata         |
-| `CONFIG_JSON`     | text           | runtime limits and retention               |
-| `RETRIEVAL_TOKEN` | secret         | admin bearer token                         |
+| binding       | type           | purpose                                    |
+| ------------- | -------------- | ------------------------------------------ |
+| `DB`          | D1             | events, context snapshots, report metadata |
+| `REPORTS`     | R2             | private report body storage                |
+| `RECORDS`     | Queue producer | event payloads and report metadata         |
+| `CONFIG_JSON` | text           | runtime limits and retention               |
 
 The queue consumer is the same Worker. Its trigger and DLQ are declared in the generated Build Output and applied with `pnpm triggers:staging` or `pnpm triggers:production`.
 
 ## Retention and failure behavior
 
-Retention is a privacy policy, not a capacity tuning knob. Events and contexts expire after **30 days**, reports after **14 days**. Expired records are not available through retrieval; scheduled D1 cleanup and R2 lifecycle deletion are asynchronous. `CONFIG_JSON` rejects longer retention and requires pending grace to match the report retention period.
+Retention is a privacy policy, not a capacity tuning knob. Events and contexts expire after **30 days**, reports after **14 days**. Expired records are no longer readable; scheduled D1 cleanup and R2 lifecycle deletion are asynchronous. `CONFIG_JSON` rejects longer retention and requires pending grace to match the report retention period.
 
 - **Events/contexts:** the hourly cron deletes expired events in bounded batches; context rows are deleted first in the same atomic D1 batch.
-- **Reports:** the cron atomically claims expired `stored` rows and `pending` rows older than the report retention window as `state = deleting`, deletes their R2 objects, then tombstones the IDs and deletes metadata in one D1 transaction. Claimed rows are hidden from retrieval immediately. If R2 deletion fails, the claim lease expires and the next run retries it. The pending grace equals the report retention, so an accepted report is not cleaned early.
+- **Reports:** the cron atomically claims expired `stored` rows and `pending` rows older than the report retention window as `state = deleting`, deletes their R2 objects, then tombstones the IDs and deletes metadata in one D1 transaction. Claimed rows are excluded immediately. If R2 deletion fails, the claim lease expires and the next run retries it. The pending grace equals the report retention, so an accepted report is not cleaned early.
 - **Deletion tombstones:** when retention deletes a report, its ID is tombstoned in the same transaction. A delayed queue message or client retry cannot recreate an expired report row or resurrect its body.
 - **R2 lifecycle:** an R2 lifecycle rule on the `reports/` prefix is required as a hard backstop for report bodies, including objects orphaned by a crash between R2 put and D1 insert. Its `maxAge` must be at most 14 days (`1209600` seconds); a longer rule would outlive the privacy window.
 - **R2 failure:** the report is rejected with `storage_unavailable`; no metadata or queue message is created. R2 is written before D1 and Queues.
@@ -263,8 +223,7 @@ Expired counts should return to zero after each hourly run. The cleanup invocati
 - No payload or report body is logged. Logs carry counts, system message IDs, and fixed error categories only.
 - R2 is private; no public bucket or custom domain is configured.
 - Report bodies are gzip-compressed under keys containing the report UUID and plaintext SHA-256 digest. The consumer checks R2 metadata before promotion.
-- Retrieval requires a bearer secret and Cloudflare Access on `telemetry-admin.lucy.lc`. The production configuration restricts admin routes to that hostname; staging leaves retrieval disabled.
-- Public ingestion uses the separate `telemetry.lucy.lc` hostname in production and `workers.dev` in staging.
+- The Worker serves one public hostname, `telemetry.lucy.lc`, in production and `workers.dev` in staging.
 - Workers observability invocation logs are disabled in the generated Build Output; only application log lines are kept.
 
 ## Development
@@ -285,3 +244,7 @@ pnpm build:staging
 ```
 
 `pnpm check` runs `cargo check --target wasm32-unknown-unknown`. The build, deploy-check, deploy, and triggers tasks exist as `:staging` and `:production` variants; `build:<mode>` produces the Cloudflare Build Output under `.cloudflare/output/v0`, and `pnpm migrate` applies migrations to the D1 database named by `LUCY_TELEMETRY_D1_ID`.
+
+Deploys carry no secrets: the Worker has no secret bindings, so `pnpm deploy:production` uploads the Build Output as-is.
+
+Workers Builds builds and deploys `main` with commands of its own: the build command installs the Rust toolchain and `worker-build` 0.8.7 before running `pnpm build:production`, and the deploy command runs `pnpm deploy:production`.

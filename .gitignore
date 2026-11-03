@@ -35,4 +35,3 @@ test_*/
 .env.*
 !.env.example
 deploy/*.local.*
-.retrieval-token

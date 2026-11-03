@@ -23,12 +23,6 @@ ON CONFLICT(event_id, ordinal) DO NOTHING";
 pub const SELECT_EVENT_DIGEST: &str = "\
 SELECT ingest_digest FROM events WHERE id = ?";
 
-pub const SELECT_CONTEXTS: &str = "\
-SELECT ordinal, context_type, status, data
-FROM context_snapshots
-WHERE event_id = ?
-ORDER BY ordinal ASC";
-
 pub const DELETE_EXPIRED_CONTEXTS: &str = "\
 DELETE FROM context_snapshots
 WHERE event_id IN (

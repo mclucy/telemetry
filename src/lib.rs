@@ -7,7 +7,6 @@ mod ingest;
 mod models;
 mod privacy;
 mod queue_consumer;
-mod retrieval;
 mod sql;
 mod util;
 
@@ -70,10 +69,6 @@ async fn dispatch(
             return util::method_not_allowed("POST");
         }
         return ingest::handle(request, env).await;
-    }
-
-    if path.starts_with("/v1/") {
-        return retrieval::handle(request, env, method, path).await;
     }
 
     util::error_response(404, "not_found")

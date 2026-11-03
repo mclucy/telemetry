@@ -15,7 +15,6 @@ export default defineConfig(({ mode }) => {
   const name =
     process.env.LUCY_TELEMETRY_RESOURCE_PREFIX ||
     (production ? "lucy-telemetry" : "lucy-telemetry-staging");
-  const adminHost = production ? "telemetry-admin.lucy.lc" : undefined;
 
   return {
     accountId,
@@ -25,19 +24,15 @@ export default defineConfig(({ mode }) => {
       compatibilityDate: "2026-10-01",
       workersDev: !production,
       previewUrls: false,
-      domains:
-        adminHost === undefined
-          ? []
-          : [
-              { hostname: "telemetry.lucy.lc", production: true, previews: false },
-              { hostname: adminHost, production: true, previews: false },
-            ],
+      placement: { mode: "smart" },
+      domains: production
+        ? [{ hostname: "telemetry.lucy.lc", production: true, previews: false }]
+        : [],
       env: {
-        DB: bindings.d1({ name, id: production ? productionDatabaseId : undefined }),
+        DB: bindings.d1(production ? { id: productionDatabaseId } : { name }),
         REPORTS: bindings.r2({ name }),
         RECORDS: bindings.queue({ name }),
-        CONFIG_JSON: bindings.text(JSON.stringify({ environment, admin_host: adminHost })),
-        RETRIEVAL_TOKEN: bindings.secret(),
+        CONFIG_JSON: bindings.text(JSON.stringify({ environment })),
       },
       triggers: [
         triggers.queue({
@@ -52,7 +47,12 @@ export default defineConfig(({ mode }) => {
         }),
         triggers.scheduled({ schedule: "7 * * * *" }),
       ],
-      observability: { enabled: true, logs: { enabled: true, invocationLogs: false } },
+      observability: {
+        enabled: true,
+        logs: { enabled: true, invocationLogs: false },
+        issues: { enabled: true },
+        traces: { enabled: true },
+      },
     },
   };
 });

@@ -1,10 +1,8 @@
-use std::collections::HashMap;
-
-use chrono::{DateTime, SecondsFormat, TimeDelta, Utc};
+use chrono::{SecondsFormat, TimeDelta, Utc};
 use futures_util::StreamExt;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use worker::{console_error, wasm_bindgen::JsValue, Env, Error, Request, Response, Result};
+use worker::{wasm_bindgen::JsValue, Error, Request, Response, Result};
 
 pub enum BodyReadError {
     TooLarge,
@@ -25,13 +23,6 @@ pub fn cutoff_rfc3339_hours(hours: i64) -> String {
     (Utc::now() - TimeDelta::hours(hours)).to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
-pub fn canonical_filter_time(value: &str) -> Option<String> {
-    DateTime::parse_from_rfc3339(value.trim())
-        .ok()
-        .map(|parsed| parsed.with_timezone(&Utc))
-        .map(|utc| utc.to_rfc3339_opts(SecondsFormat::Millis, true))
-}
-
 pub fn sha256_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     let mut output = String::with_capacity(digest.len() * 2);
@@ -42,52 +33,6 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     output
 }
 
-/// Constant-time comparison of secrets. Both sides are hashed first so the
-/// comparison does not leak the configured token's length.
-pub fn constant_time_eq(left: &str, right: &str) -> bool {
-    let left = Sha256::digest(left.as_bytes());
-    let right = Sha256::digest(right.as_bytes());
-    let mut difference = 0u8;
-    for (a, b) in left.iter().zip(right.iter()) {
-        difference |= a ^ b;
-    }
-    difference == 0
-}
-
-pub fn extract_bearer(request: &Request) -> Option<String> {
-    let header = request.headers().get("authorization").ok()??;
-    let (scheme, token) = header.split_once(' ')?;
-    if !scheme.eq_ignore_ascii_case("bearer") {
-        return None;
-    }
-    let token = token.trim();
-    if token.is_empty() || token.contains(char::is_whitespace) {
-        return None;
-    }
-    Some(token.to_string())
-}
-
-pub fn is_authorized(request: &Request, env: &Env) -> bool {
-    let Some(provided) = extract_bearer(request) else {
-        return false;
-    };
-    let expected = match env.secret("RETRIEVAL_TOKEN") {
-        Ok(secret) => secret.to_string(),
-        Err(_) => {
-            console_error!("retrieval_token_missing");
-            return false;
-        }
-    };
-    !expected.is_empty() && constant_time_eq(&provided, &expected)
-}
-
-pub fn query_map(request: &Request) -> Result<HashMap<String, String>> {
-    let url = request.url()?;
-    Ok(url
-        .query_pairs()
-        .map(|(key, value)| (key.into_owned(), value.into_owned()))
-        .collect())
-}
 
 pub async fn read_body_limited(
     request: &mut Request,
@@ -147,15 +92,6 @@ pub fn json_response<T: Serialize>(status: u16, value: &T) -> Result<Response> {
     no_store(Response::from_json(value)?.with_status(status))
 }
 
-pub fn text_response(text: String, content_type: &str) -> Result<Response> {
-    let mut response = Response::ok(text)?;
-    let headers = response.headers_mut();
-    headers.set("content-type", content_type)?;
-    headers.set("content-disposition", "inline")?;
-    headers.set("content-security-policy", "default-src 'none'")?;
-    no_store(response)
-}
-
 pub fn error_response(status: u16, code: &str) -> Result<Response> {
     json_response(
         status,
@@ -173,14 +109,6 @@ pub fn payload_too_large(max: usize) -> Result<Response> {
             "max_bytes": max,
         }),
     )
-}
-
-pub fn unauthorized() -> Result<Response> {
-    let mut response = error_response(401, "unauthorized")?;
-    response
-        .headers_mut()
-        .set("www-authenticate", "Bearer realm=\"lucy-telemetry\"")?;
-    Ok(response)
 }
 
 pub fn method_not_allowed(allow: &str) -> Result<Response> {

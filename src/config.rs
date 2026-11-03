@@ -24,7 +24,6 @@ pub const MAX_QUEUE_MESSAGE_BYTES: usize = 120 * 1024;
 #[serde(default)]
 pub struct Config {
     pub environment: String,
-    pub admin_host: Option<String>,
     pub max_request_bytes: usize,
     pub max_records: usize,
     pub max_record_bytes: usize,
@@ -43,7 +42,6 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             environment: "unknown".to_string(),
-            admin_host: None,
             max_request_bytes: DEFAULT_MAX_REQUEST_BYTES,
             max_records: DEFAULT_MAX_RECORDS,
             max_record_bytes: DEFAULT_MAX_RECORD_BYTES,
@@ -82,16 +80,6 @@ impl Config {
 
         if self.environment.is_empty() || self.environment.len() > 64 {
             return fail("environment must be 1..=64 bytes");
-        }
-        if let Some(host) = &self.admin_host {
-            if host.is_empty()
-                || host.len() > 253
-                || host.contains('/')
-                || host.contains(':')
-                || host.contains(char::is_whitespace)
-            {
-                return fail("admin_host must be a bare hostname (no scheme, port, or path)");
-            }
         }
         if !(1024..=1024 * 1024).contains(&self.max_request_bytes) {
             return fail("max_request_bytes must be 1024..=1048576");
