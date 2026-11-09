@@ -50,17 +50,17 @@ jobs:
       # A cold cache compiles worker-build (~4 minutes); a warm cache skips it.
       - run: cargo install --locked --version 0.8.7 worker-build
 
-      - run: pnpm build:production
+      - run: worker-build --release && pnpm exec vp build --mode production
 
       # --dry-run sends no API requests, so this validates the bundle and the
       # Build Output rather than the live bindings.
       - if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
-        run: pnpm deploy-check:production
+        run: pnpm exec cf deploy --prebuilt --mode production --dry-run --provision=false
 
       # cf deploy also applies routes, custom domains, cron schedules and queue
       # consumers, so a separate triggers step is not required.
       - if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
-        run: pnpm deploy:production
+        run: pnpm exec cf deploy --prebuilt --mode production --provision=false
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
