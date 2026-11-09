@@ -16,9 +16,9 @@
     "migrate": "cf d1 migrations apply \"$LUCY_TELEMETRY_D1_ID\" --dir migrations"
   },
   "devDependencies": {
-    "@cloudflare/vite-plugin": "2.0.0-beta.v.7",
-    "@types/node": "^26.6.5",
-    "cf": "1.0.0-beta.24",
+    "@cloudflare/vite-plugin": "2.0.0-beta.v.12",
+    "@types/node": "^26.6.6",
+    "cf": "1.0.0-beta.28",
     "vite": "catalog:",
     "vite-plus": "catalog:"
   },
