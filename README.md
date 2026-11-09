@@ -243,12 +243,12 @@ Task entrypoints are pnpm scripts in `package.json`:
 
 ```sh
 pnpm check
-pnpm build:production
+pnpm build
 ```
 
-`pnpm check` runs `cargo check --target wasm32-unknown-unknown`. `build:production` produces the Cloudflare Build Output under `.cloudflare/output/v0`, `deploy-check:production` validates it without uploading, and `deploy:production` deploys it. `triggers:production` reapplies trigger configuration without uploading a new version. `pnpm migrate` applies migrations to the D1 database named by `LUCY_TELEMETRY_D1_ID`.
+`pnpm check` runs `cargo check --target wasm32-unknown-unknown`. `build` produces the Cloudflare Build Output under `.cloudflare/output/v0`, and `deploy` deploys it. `trigger` reapplies trigger configuration without uploading a new version. `pnpm migrate` applies migrations to the D1 database named by `LUCY_TELEMETRY_D1_ID`.
 
-Deploys carry no secrets: the Worker has no secret bindings, so `pnpm deploy:production` uploads the Build Output as-is.
+Deploys carry no secrets: the Worker has no secret bindings, so `pnpm deploy` uploads the Build Output as-is.
 
 ## Continuous integration
 
