@@ -1,0 +1,5 @@
+# Keep in sync with the rust-version in Cargo.toml.
+[toolchain]
+channel = "1.91.0"
+profile = "minimal"
+targets = ["wasm32-unknown-unknown"]
