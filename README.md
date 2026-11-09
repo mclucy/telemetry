@@ -29,7 +29,7 @@ Scheduled cleanup (hourly)
 
 All responses set `cache-control: no-store`.
 
-Production ingestion uses `https://telemetry.lucy.lc`. Staging uses its `workers.dev` URL.
+Production ingestion uses `https://telemetry.lucy.lc`.
 
 ### `GET /health`
 
@@ -172,7 +172,7 @@ The deployment writes one `CONFIG_JSON` text binding. Missing configuration uses
 | `RECORDS`     | Queue producer | event payloads and report metadata         |
 | `CONFIG_JSON` | text           | runtime limits and retention               |
 
-The queue consumer is the same Worker. Its trigger and DLQ are declared in the generated Build Output and applied with `pnpm triggers:staging` or `pnpm triggers:production`.
+The queue consumer is the same Worker. Its trigger and DLQ are declared in the generated Build Output and applied by `cf deploy`.
 
 ## Retention and failure behavior
 
@@ -225,7 +225,7 @@ Expired counts should return to zero after each hourly run. The cleanup invocati
 - No payload or report body is logged. Logs carry counts, system message IDs, and fixed error categories only.
 - R2 is private; no public bucket or custom domain is configured.
 - Report bodies are gzip-compressed under keys containing the report UUID and plaintext SHA-256 digest. The consumer checks R2 metadata before promotion.
-- The Worker serves one public hostname, `telemetry.lucy.lc`, in production and `workers.dev` in staging.
+- The Worker serves one public hostname, `telemetry.lucy.lc`.
 - Workers observability invocation logs are disabled in the generated Build Output; only application log lines are kept.
 
 ## Development
@@ -243,10 +243,10 @@ Task entrypoints are pnpm scripts in `package.json`:
 
 ```sh
 pnpm check
-pnpm build:staging
+pnpm build:production
 ```
 
-`pnpm check` runs `cargo check --target wasm32-unknown-unknown`. The build, deploy-check, deploy, and triggers tasks exist as `:staging` and `:production` variants; `build:<mode>` produces the Cloudflare Build Output under `.cloudflare/output/v0`, and `pnpm migrate` applies migrations to the D1 database named by `LUCY_TELEMETRY_D1_ID`.
+`pnpm check` runs `cargo check --target wasm32-unknown-unknown`. `build:production` produces the Cloudflare Build Output under `.cloudflare/output/v0`, `deploy-check:production` validates it without uploading, and `deploy:production` deploys it. `triggers:production` reapplies trigger configuration without uploading a new version. `pnpm migrate` applies migrations to the D1 database named by `LUCY_TELEMETRY_D1_ID`.
 
 Deploys carry no secrets: the Worker has no secret bindings, so `pnpm deploy:production` uploads the Build Output as-is.
 
