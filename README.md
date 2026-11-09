@@ -120,7 +120,9 @@ Response:
 ```json
 {
   "accepted": ["<uuid>"],
-  "rejected": [{ "id": "<uuid>", "reason": "invalid_field", "field": "payload.command" }],
+  "rejected": [
+    { "id": "<uuid>", "reason": "invalid_field", "field": "payload.command" }
+  ],
   "retryable": true
 }
 ```
@@ -231,10 +233,11 @@ Expired counts should return to zero after each hourly run. The cleanup invocati
 Prerequisites:
 
 ```sh
-rustup target add wasm32-unknown-unknown
 cargo install worker-build --version 0.8.7 --locked
 pnpm install --frozen-lockfile
 ```
+
+`rust-toolchain.toml` pins Rust 1.91.0 and installs the `wasm32-unknown-unknown` target on first use.
 
 Task entrypoints are pnpm scripts in `package.json`:
 
@@ -247,4 +250,10 @@ pnpm build:staging
 
 Deploys carry no secrets: the Worker has no secret bindings, so `pnpm deploy:production` uploads the Build Output as-is.
 
-Workers Builds builds and deploys `main` with commands of its own: the build command installs the Rust toolchain and `worker-build` 0.8.7 before running `pnpm build:production`, and the deploy command runs `pnpm deploy:production`.
+## Continuous integration
+
+CI runs in GitHub Actions (`.github/workflows/deploy.yml`). Pull requests build the Worker and run `pnpm deploy-check`; pushes to `main` deploy with `pnpm deploy`. The workflow installs Rust 1.91, caches `~/.cargo` and `target/`, installs `worker-build` 0.8.7, and deploys the resulting Build Output with `--prebuilt`.
+
+Set `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` as repository secrets for the deploy step. The Workers Builds trigger is removed so a push is not deployed twice.
+
+> **Temporary:** Workers Builds does not provide Rust in its build image and does not cache `~/.cargo` or `target/`, so building there recompiles `worker-build` on every push. Build in Actions until Cloudflare offers native Rust build support or caching. Track [workers-rs#1021](https://github.com/cloudflare/workers-rs/issues/1021) and [workers-rs#1069](https://github.com/cloudflare/workers-rs/pull/1069).
