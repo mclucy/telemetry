@@ -5,14 +5,9 @@
   "scripts": {
     "check": "cargo check --target wasm32-unknown-unknown",
     "fmt": "cargo fmt --all",
-    "build:staging": "worker-build --release && vp build --mode staging",
-    "build:production": "worker-build --release && vp build --mode production",
-    "deploy-check:staging": "cf deploy --prebuilt --mode staging --dry-run --provision=false",
-    "deploy-check:production": "cf deploy --prebuilt --mode production --dry-run --provision=false",
-    "deploy:staging": "cf deploy --prebuilt --mode staging --provision=false",
-    "deploy:production": "cf deploy --prebuilt --mode production --provision=false",
-    "triggers:staging": "cf workers triggers deploy --prebuilt --mode staging",
-    "triggers:production": "cf workers triggers deploy --prebuilt --mode production",
+    "build": "worker-build --release && vp build --mode production",
+    "deploy": "cf deploy --prebuilt --mode production --provision=false",
+    "triggers": "cf workers triggers deploy --prebuilt --mode production",
     "migrate": "cf d1 migrations apply \"$LUCY_TELEMETRY_D1_ID\" --dir migrations"
   },
   "devDependencies": {
