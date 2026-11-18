@@ -42,11 +42,13 @@ Requires `Content-Type: application/json`.
 ```json
 {
   "records": [
-    { "id": "<uuid>", "type": "event", "payload": {} },
+    { "id": "<uuid>", "type": "event", "payload": {}, "upload": { "queue_ms": 512, "attempts": 1, "throttles": 0 } },
     { "id": "<uuid>", "type": "report", "payload": {} }
   ]
 }
 ```
+
+`upload` is optional and applies only to events. It reports local queue residence at the upload attempt, the number of attempts for this record, and the number of earlier intake-limited attempts. It is stored as a `transport` context on first receipt. A retry can carry different upload measurements without changing the event's identity.
 
 Event payload:
 
@@ -71,6 +73,7 @@ Context item:
 {
   "type": "workspace",
   "status": "present",
+  "version": 1,
   "data": {
     "product": "fabric",
     "product_version": "0.16.9",
@@ -80,19 +83,27 @@ Context item:
 }
 ```
 
-`type` is `workspace`, `java`, or `agent`. `status` is `present`, `absent`, or `failed`. `data` is required and non-null for `present`, and must be omitted/null for `absent` or `failed`. Serialized `data` is at most 8 KiB.
+`status` is `present`, `absent`, or `failed`. `present` requires non-null `data`. `absent` and `failed` have no data and can include a fixed availability `reason`. The optional `version` identifies the shape of the context independently of the event protocol. Serialized `data` is at most 8 KiB.
 
-`data` is a typed allowlist, not arbitrary JSON: unknown fields are rejected. Allowed fields by type (all are optional, but only these names are accepted):
+The service validates typed fields rather than storing arbitrary JSON:
 
 | type        | fields                                                                                                                            |
 | ----------- | --------------------------------------------------------------------------------------------------------------------------------- |
 | `workspace` | `product` (1–64 identifier chars), `product_version` and `minecraft_version` (1–64 version chars), `packages` (integer 0–1000000) |
 | `java`      | `major` (integer 1–255), `version` (1–64 version chars), `distribution` (1–64 identifier chars)                                   |
 | `agent`     | `detected` (boolean)                                                                                                              |
+| `invocation` | Intent, output mode, offline mode, an allowlist of flag names and value kinds, and optionally the positional argument count |
+| `execution` | Bounded phase durations and state, active phase, cancellation or failure category, slow-run marker, and observed HTTP and workspace lock times |
+| `prompt` | Prompt availability, count, cumulative wait, and whether a prompt was aborted |
+| `scale` | Observed package, file, and candidate counts |
+| `warnings` | Bounded recoverable warning and resolution rejection counts |
+| `collection` | Whether the invocation ID is available in the local diagnostic log |
+
+The service derives `transport` from the record envelope. Clients cannot supply this type in `payload.contexts`. New observations carry no raw arguments, flag values, resource names, paths, URLs, environment values, or diagnostic text.
 
 Identifier characters are ASCII alphanumerics and `._-+:`. Version strings contain at least one digit and use ASCII alphanumerics and `.+-_`.
 
-Examples for the other two context types:
+Examples for Java and agent context:
 
 ```json
 {"type":"java","status":"present","data":{"major":21,"version":"21.0.4","distribution":"temurin"}}
@@ -186,6 +197,7 @@ Retention is a privacy policy, not a capacity tuning knob. Events and contexts e
 - **D1 failure:** the request fails closed; any R2 object without metadata is cleaned by the lifecycle rule.
 - **Queue failure:** the response is `503` with `accepted: []`. Report rows are `pending`; retries heal them only while the R2 body still exists. The DLQ captures messages that exhaust consumer retries.
 - **Duplicate delivery:** the consumer uses stable IDs and idempotent SQL. Event and context writes are one D1 batch; report metadata is inserted or updated only when the body digest matches.
+- **Intake pressure:** the hourly ledger counts records denied by the intake cap. These are delivery attempts, not unique lost events. A client may retry and deliver the same record later.
 - **Consumer failure:** the message is retried; after the configured retries it moves to the DLQ. Invalid internal messages also reach the DLQ after retries.
 
 ### Pending and DLQ recovery limits
@@ -253,6 +265,8 @@ Deploys carry no secrets: the Worker has no secret bindings, so `pnpm deploy` up
 ## Continuous integration
 
 CI runs in GitHub Actions (`.github/workflows/deploy.yml`). Pull requests build the Worker and run a deploy dry run; pushes to `main` deploy the prebuilt Build Output. The workflow installs Rust 1.91, caches `~/.cargo` and `target/`, installs `worker-build` 0.8.7, and deploys the result with `--prebuilt`.
+
+Apply D1 migrations before deploying code that uses the new schema. For the invocation observation migration, deploy ingestion first, then the dashboard, then release the Lucy client that emits the new contexts.
 
 Set `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` as repository secrets for the deploy step. The Workers Builds trigger is removed so a push is not deployed twice.
 

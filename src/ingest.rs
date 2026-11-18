@@ -178,7 +178,14 @@ pub async fn handle(request: &mut Request, env: &Env) -> worker::Result<Response
 
         match raw.record_type.as_str() {
             "event" => {
-                match validate_event(&raw.id, &raw.payload, &config, &received_at, payload_bytes) {
+                match validate_event(
+                    &raw.id,
+                    &raw.payload,
+                    &config,
+                    &received_at,
+                    payload_bytes,
+                    raw.upload.as_ref(),
+                ) {
                     Ok(event) => {
                         let message = QueueMessage::Event {
                             v: QueueMessage::VERSION,
@@ -433,37 +440,63 @@ async fn reserve_intake(
         return Ok(());
     }
     let (event_cap, report_cap) = intake_capacity(config);
-    if events > event_cap || reports > report_cap {
-        return Err(ReserveError::Limited);
+    let database = env.d1("DB").map_err(|_| ReserveError::Storage)?;
+    let bucket = hour_bucket();
+
+    if events <= event_cap && reports <= report_cap {
+        let result = database
+            .prepare(sql::RESERVE_INTAKE)
+            .bind(&[
+                util::js_str(&bucket),
+                util::js_num(events),
+                util::js_num(reports),
+                util::js_num(event_cap),
+                util::js_num(report_cap),
+            ])
+            .map_err(|_| ReserveError::Storage)?
+            .run()
+            .await
+            .map_err(|_| ReserveError::Storage)?;
+        if !result.success() {
+            return Err(ReserveError::Storage);
+        }
+        let changes = result
+            .meta()
+            .ok()
+            .flatten()
+            .and_then(|meta| meta.changes)
+            .unwrap_or(0);
+        if changes > 0 {
+            return Ok(());
+        }
     }
 
-    let database = env.d1("DB").map_err(|_| ReserveError::Storage)?;
-    let result = database
-        .prepare(sql::RESERVE_INTAKE)
-        .bind(&[
-            util::js_str(&hour_bucket()),
-            util::js_num(events),
-            util::js_num(reports),
-            util::js_num(event_cap),
-            util::js_num(report_cap),
-        ])
-        .map_err(|_| ReserveError::Storage)?
-        .run()
-        .await
-        .map_err(|_| ReserveError::Storage)?;
-    if !result.success() {
-        return Err(ReserveError::Storage);
-    }
-    let changes = result
-        .meta()
-        .ok()
-        .flatten()
-        .and_then(|meta| meta.changes)
-        .unwrap_or(0);
-    if changes == 0 {
-        Err(ReserveError::Limited)
-    } else {
-        Ok(())
+    record_limited_attempt(&database, &bucket, events, reports).await;
+    Err(ReserveError::Limited)
+}
+
+/// Best effort: a counter failure must not turn a retryable cap rejection into
+/// a storage failure, and it must keep the admission response retryable.
+async fn record_limited_attempt(
+    database: &worker::D1Database,
+    bucket: &str,
+    events: i64,
+    reports: i64,
+) {
+    let statement = match database.prepare(sql::RECORD_INTAKE_LIMITED).bind(&[
+        util::js_str(bucket),
+        util::js_num(events),
+        util::js_num(reports),
+    ]) {
+        Ok(statement) => statement,
+        Err(_) => {
+            console_error!("ingest_intake_counter_failed");
+            return;
+        }
+    };
+    match statement.run().await {
+        Ok(result) if result.success() => {}
+        _ => console_error!("ingest_intake_counter_failed"),
     }
 }
 

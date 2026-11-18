@@ -13,8 +13,8 @@ ON CONFLICT(id) DO NOTHING";
 
 /// A conflicting duplicate event cannot change its accepted contexts.
 pub const INSERT_CONTEXT: &str = "\
-INSERT INTO context_snapshots (event_id, ordinal, context_type, status, data)
-SELECT ?, ?, ?, ?, ?
+INSERT INTO context_snapshots (event_id, ordinal, context_type, status, version, reason, data)
+SELECT ?, ?, ?, ?, ?, ?, ?
 WHERE EXISTS (
     SELECT 1 FROM events WHERE id = ? AND ingest_digest = ?
 )
@@ -149,6 +149,15 @@ ON CONFLICT(bucket) DO UPDATE SET
     reports = intake_budget.reports + excluded.reports
 WHERE intake_budget.events + excluded.events <= ?4
   AND intake_budget.reports + excluded.reports <= ?5";
+
+/// Counts denied delivery attempts, not unique records. It never advances the
+/// quota columns; the ledger row still expires with the bucket TTL.
+pub const RECORD_INTAKE_LIMITED: &str = "\
+INSERT INTO intake_budget (bucket, events, reports, limited_events, limited_reports)
+VALUES (?1, 0, 0, ?2, ?3)
+ON CONFLICT(bucket) DO UPDATE SET
+    limited_events = intake_budget.limited_events + excluded.limited_events,
+    limited_reports = intake_budget.limited_reports + excluded.limited_reports";
 
 pub const DELETE_OLD_INTAKE_BUCKETS: &str = "\
 DELETE FROM intake_budget

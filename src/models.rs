@@ -6,7 +6,67 @@ use uuid::Uuid;
 use crate::config::Config;
 
 const MAX_DURATION_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+const MAX_DURATION_MS_U64: u64 = MAX_DURATION_MS as u64;
 const MAX_SCHEMA_VERSION: i64 = 1000;
+const MAX_COUNT: u64 = 10_000;
+const MAX_SCALE: u64 = 1_000_000;
+
+/// Phase identifiers are a fixed wire vocabulary. `active_phase` is checked
+/// against the same set, so no arbitrary stage string is ever stored.
+const PHASE_NAMES: [&str; 12] = [
+    "setup",
+    "command",
+    "server",
+    "packages",
+    "install",
+    "python_environment",
+    "download_pack",
+    "download_archive",
+    "files",
+    "loader_installer",
+    "adoption",
+    "identification",
+];
+
+/// Flag names are an allowlist. Only names and value kinds are collected;
+/// values, tokens, and paths never are.
+const FLAG_NAMES: [&str; 31] = [
+    "offline",
+    "json",
+    "json-compact",
+    "no-interactive",
+    "no-style",
+    "no-color",
+    "server",
+    "core",
+    "core-version",
+    "minecraft",
+    "locked",
+    "yes",
+    "interactive",
+    "dry-run",
+    "all",
+    "provider",
+    "source",
+    "loader",
+    "latest",
+    "version",
+    "channel",
+    "force",
+    "output",
+    "path",
+    "directory",
+    "name",
+    "package",
+    "java",
+    "log-file",
+    "log-level",
+    "print-logs",
+];
+
+const ABSENT_REASONS: [&str; 4] = ["not_observed", "not_reached", "not_applicable", "no_result"];
+
+const FAILED_REASON: &str = "observation_failed";
 
 #[derive(Debug, Deserialize)]
 pub struct IngestRequest {
@@ -19,6 +79,19 @@ pub struct RawRecord {
     #[serde(rename = "type")]
     pub record_type: String,
     pub payload: Value,
+    /// Client-measured queue residence for an event record. Admission injects
+    /// it as a `transport` context; it is not server receipt timing, and a
+    /// payload may not supply a `transport` context directly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upload: Option<UploadInput>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UploadInput {
+    pub queue_ms: i64,
+    pub attempts: i64,
+    pub throttles: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -49,6 +122,10 @@ pub struct ContextInput {
     pub context_type: String,
     pub status: String,
     #[serde(default)]
+    pub version: Option<i64>,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
     pub data: Option<Value>,
 }
 
@@ -74,6 +151,12 @@ pub struct ContextRecord {
     #[serde(rename = "type")]
     pub context_type: String,
     pub status: String,
+    /// Nullable so records queued before this schema stay byte-identical on
+    /// re-serialization, which keeps their event digest stable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
     pub data: Option<Value>,
 }
 
@@ -220,11 +303,62 @@ fn validate_schema_version(value: i64) -> Result<i64, ValidationError> {
     Ok(value)
 }
 
+fn context_data_error() -> ValidationError {
+    ValidationError::new("invalid_context", "contexts.data")
+}
+
+/// A payload may only carry observation contexts. `transport` is injected by
+/// ingestion from the client-measured upload envelope, so a payload may not
+/// set it directly.
+fn is_payload_context_type(kind: &str) -> bool {
+    matches!(
+        kind,
+        "workspace"
+            | "java"
+            | "agent"
+            | "invocation"
+            | "execution"
+            | "prompt"
+            | "scale"
+            | "warnings"
+            | "collection"
+    )
+}
+
+fn validate_context_version(version: Option<i64>) -> Result<Option<i64>, ValidationError> {
+    match version {
+        None => Ok(None),
+        Some(1) => Ok(Some(1)),
+        Some(_) => Err(ValidationError::new("invalid_context", "contexts.version")),
+    }
+}
+
+fn validate_context_reason(
+    status: &str,
+    reason: Option<&str>,
+) -> Result<Option<String>, ValidationError> {
+    let Some(reason) = reason else {
+        return Ok(None);
+    };
+    let valid = match status {
+        "absent" => ABSENT_REASONS.contains(&reason),
+        "failed" => reason == FAILED_REASON,
+        _ => false,
+    };
+    if valid {
+        Ok(Some(reason.to_string()))
+    } else {
+        Err(ValidationError::new("invalid_context", "contexts.reason"))
+    }
+}
+
 fn validate_context(input: ContextInput, cfg: &Config) -> Result<ContextRecord, ValidationError> {
     let context_type = required_string(&input.context_type, "contexts.type", 64)?;
-    if context_type != "workspace" && context_type != "java" && context_type != "agent" {
+    if !is_payload_context_type(&context_type) {
         return Err(ValidationError::new("invalid_context", "contexts.type"));
     }
+    let version = validate_context_version(input.version)?;
+    let reason = validate_context_reason(&input.status, input.reason.as_deref())?;
     let data = match input.status.as_str() {
         "present" => {
             let value = input
@@ -244,8 +378,7 @@ fn validate_context(input: ContextInput, cfg: &Config) -> Result<ContextRecord, 
     };
 
     if let Some(value) = &data {
-        let encoded = serde_json::to_vec(value)
-            .map_err(|_| ValidationError::new("invalid_context", "contexts.data"))?;
+        let encoded = serde_json::to_vec(value).map_err(|_| context_data_error())?;
         if encoded.len() > cfg.max_context_bytes {
             return Err(ValidationError::new("context_too_large", "contexts.data"));
         }
@@ -255,14 +388,257 @@ fn validate_context(input: ContextInput, cfg: &Config) -> Result<ContextRecord, 
     Ok(ContextRecord {
         context_type,
         status: input.status,
+        version,
+        reason,
         data,
     })
 }
 
 fn validate_context_data(kind: &str, value: &Value) -> Result<(), ValidationError> {
-    let fields = value
-        .as_object()
-        .ok_or_else(|| ValidationError::new("invalid_context", "contexts.data"))?;
+    match kind {
+        "workspace" | "java" | "agent" => validate_legacy_context_data(kind, value),
+        "invocation" => validate_invocation_data(value),
+        "execution" => validate_execution_data(value),
+        "prompt" => validate_prompt_data(value),
+        "scale" => validate_scale_data(value),
+        "warnings" => validate_warnings_data(value),
+        "collection" => validate_collection_data(value),
+        _ => Err(context_data_error()),
+    }
+}
+
+/// Observation contexts are closed objects: unknown fields, null fields, and
+/// arbitrary strings are rejected rather than stored.
+fn strict_context_object(value: &Value) -> Result<(), ValidationError> {
+    let object = value.as_object().ok_or_else(context_data_error)?;
+    if object.values().any(Value::is_null) {
+        return Err(context_data_error());
+    }
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InvocationData {
+    intent: String,
+    output: String,
+    /// Effective state only; presence and type are the contract.
+    #[allow(dead_code)]
+    offline: bool,
+    #[serde(default)]
+    flags: Option<Vec<InvocationFlag>>,
+    #[serde(default)]
+    positionals: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InvocationFlag {
+    name: String,
+    kind: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExecutionData {
+    #[serde(default)]
+    phases: Option<Vec<ExecutionPhase>>,
+    #[serde(default)]
+    active_phase: Option<String>,
+    #[serde(default)]
+    cancel_reason: Option<String>,
+    #[serde(default)]
+    failure_kind: Option<String>,
+    /// Slow-run marker; the type check is the contract.
+    #[allow(dead_code)]
+    slow: bool,
+    #[serde(default)]
+    http_ms: Option<u64>,
+    #[serde(default)]
+    lock_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExecutionPhase {
+    name: String,
+    elapsed_ms: u64,
+    state: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PromptData {
+    mode: String,
+    count: u64,
+    wait_ms: u64,
+    #[allow(dead_code)]
+    aborted: bool,
+    /// Set by the client when cancellation occurred while a form was open.
+    #[serde(default)]
+    #[allow(dead_code)]
+    interrupted: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScaleData {
+    #[serde(default)]
+    packages: Option<u64>,
+    #[serde(default)]
+    requested_packages: Option<u64>,
+    #[serde(default)]
+    files: Option<u64>,
+    #[serde(default)]
+    completed_files: Option<u64>,
+    #[serde(default)]
+    candidates: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WarningsData {
+    recoverable: u64,
+    #[serde(default)]
+    resolution_rejections: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CollectionData {
+    #[allow(dead_code)]
+    local_log: bool,
+}
+
+fn validate_invocation_data(value: &Value) -> Result<(), ValidationError> {
+    strict_context_object(value)?;
+    let data = InvocationData::deserialize(value).map_err(|_| context_data_error())?;
+    if !matches!(data.intent.as_str(), "command" | "invalid_usage")
+        || !matches!(data.output.as_str(), "text" | "json" | "json_compact")
+    {
+        return Err(context_data_error());
+    }
+    if data.positionals.is_some_and(|count| count > MAX_COUNT) {
+        return Err(context_data_error());
+    }
+    if let Some(flags) = &data.flags {
+        if flags.len() > FLAG_NAMES.len() {
+            return Err(context_data_error());
+        }
+        for flag in flags {
+            if !FLAG_NAMES.contains(&flag.name.as_str())
+                || !matches!(
+                    flag.kind.as_str(),
+                    "boolean" | "number" | "selector" | "version" | "text" | "list"
+                )
+            {
+                return Err(context_data_error());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_execution_data(value: &Value) -> Result<(), ValidationError> {
+    strict_context_object(value)?;
+    let data = ExecutionData::deserialize(value).map_err(|_| context_data_error())?;
+    if let Some(phases) = &data.phases {
+        if phases.len() > 24 {
+            return Err(context_data_error());
+        }
+        for phase in phases {
+            if !PHASE_NAMES.contains(&phase.name.as_str())
+                || phase.elapsed_ms > MAX_DURATION_MS_U64
+                || !matches!(phase.state.as_str(), "complete" | "active")
+            {
+                return Err(context_data_error());
+            }
+        }
+    }
+    if let Some(active_phase) = &data.active_phase {
+        if !PHASE_NAMES.contains(&active_phase.as_str()) {
+            return Err(context_data_error());
+        }
+    }
+    if let Some(cancel_reason) = &data.cancel_reason {
+        if !matches!(
+            cancel_reason.as_str(),
+            "prompt_aborted" | "interrupted" | "deadline" | "context_canceled"
+        ) {
+            return Err(context_data_error());
+        }
+    }
+    if let Some(failure_kind) = &data.failure_kind {
+        if !matches!(
+            failure_kind.as_str(),
+            "usage" | "panic" | "handled" | "command"
+        ) {
+            return Err(context_data_error());
+        }
+    }
+    for elapsed in [data.http_ms, data.lock_ms].into_iter().flatten() {
+        if elapsed > MAX_DURATION_MS_U64 {
+            return Err(context_data_error());
+        }
+    }
+    Ok(())
+}
+
+fn validate_prompt_data(value: &Value) -> Result<(), ValidationError> {
+    strict_context_object(value)?;
+    let data = PromptData::deserialize(value).map_err(|_| context_data_error())?;
+    if !matches!(
+        data.mode.as_str(),
+        "available" | "non_interactive" | "no_terminal" | "unknown"
+    ) || data.count > MAX_COUNT
+        || data.wait_ms > MAX_DURATION_MS_U64
+    {
+        return Err(context_data_error());
+    }
+    Ok(())
+}
+
+fn validate_scale_data(value: &Value) -> Result<(), ValidationError> {
+    strict_context_object(value)?;
+    let data = ScaleData::deserialize(value).map_err(|_| context_data_error())?;
+    for count in [
+        data.packages,
+        data.requested_packages,
+        data.files,
+        data.completed_files,
+        data.candidates,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if count > MAX_SCALE {
+            return Err(context_data_error());
+        }
+    }
+    Ok(())
+}
+
+fn validate_warnings_data(value: &Value) -> Result<(), ValidationError> {
+    strict_context_object(value)?;
+    let data = WarningsData::deserialize(value).map_err(|_| context_data_error())?;
+    if data.recoverable > MAX_COUNT
+        || data
+            .resolution_rejections
+            .is_some_and(|count| count > MAX_COUNT)
+    {
+        return Err(context_data_error());
+    }
+    Ok(())
+}
+
+fn validate_collection_data(value: &Value) -> Result<(), ValidationError> {
+    strict_context_object(value)?;
+    CollectionData::deserialize(value).map_err(|_| context_data_error())?;
+    Ok(())
+}
+
+fn validate_legacy_context_data(kind: &str, value: &Value) -> Result<(), ValidationError> {
+    let fields = value.as_object().ok_or_else(context_data_error)?;
     for (name, value) in fields {
         let valid = match (kind, name.as_str()) {
             ("workspace", "product") | ("java", "distribution") => {
@@ -282,10 +658,36 @@ fn validate_context_data(kind: &str, value: &Value) -> Result<(), ValidationErro
             _ => false,
         };
         if !valid {
-            return Err(ValidationError::new("invalid_context", "contexts.data"));
+            return Err(context_data_error());
         }
     }
     Ok(())
+}
+
+/// The upload envelope becomes the injected `transport` context. Its values
+/// are client-measured bounded counters; it never includes payload bytes,
+/// tokens, or text.
+fn validate_upload(upload: &UploadInput) -> Result<ContextRecord, ValidationError> {
+    if !(0..=MAX_DURATION_MS).contains(&upload.queue_ms) {
+        return Err(ValidationError::new("invalid_field", "upload.queue_ms"));
+    }
+    if !(1..=10_000).contains(&upload.attempts) {
+        return Err(ValidationError::new("invalid_field", "upload.attempts"));
+    }
+    if !(0..=10_000).contains(&upload.throttles) {
+        return Err(ValidationError::new("invalid_field", "upload.throttles"));
+    }
+    Ok(ContextRecord {
+        context_type: "transport".to_string(),
+        status: "present".to_string(),
+        version: Some(1),
+        reason: None,
+        data: Some(serde_json::json!({
+            "queue_ms": upload.queue_ms,
+            "attempts": upload.attempts,
+            "throttles": upload.throttles,
+        })),
+    })
 }
 
 fn identifier(value: &str, max: usize, spaces: bool) -> bool {
@@ -302,6 +704,7 @@ pub fn validate_event(
     cfg: &Config,
     received_at: &str,
     payload_bytes: i64,
+    upload: Option<&UploadInput>,
 ) -> Result<EventRecord, ValidationError> {
     let payload: EventPayload = serde_json::from_value(payload.clone())
         .map_err(|_| ValidationError::new("invalid_payload", "payload"))?;
@@ -315,15 +718,19 @@ pub fn validate_event(
         cfg.max_clock_skew_seconds,
     )?;
 
-    if payload.contexts.len() > cfg.max_contexts {
+    let injected = if upload.is_some() { 1 } else { 0 };
+    if payload.contexts.len() > cfg.max_contexts.saturating_sub(injected) {
         return Err(ValidationError::new(
             "too_many_contexts",
             "payload.contexts",
         ));
     }
-    let mut contexts = Vec::with_capacity(payload.contexts.len());
+    let mut contexts = Vec::with_capacity(payload.contexts.len() + injected);
     for context in payload.contexts {
         contexts.push(validate_context(context, cfg)?);
+    }
+    if let Some(upload) = upload {
+        contexts.push(validate_upload(upload)?);
     }
 
     if let Some(duration) = payload.duration_ms {
@@ -453,3 +860,29 @@ pub fn validate_report(
         body,
     })
 }
+
+                "version": 1,
+                "data": {"mode": "non_interactive", "count": 0, "wait_ms": 0, "aborted": false, "interrupted": false}
+                "version": 1,
+                "version": 1,
+                "version": 1,
+            json!([{"type": "prompt", "status": "present", "data": {"mode": "available", "count": 0, "wait_ms": 0, "aborted": false, "interrupted": "yes"}}]),
+            json!([{"type": "prompt", "status": "present", "data": {"mode": "available", "count": 0, "wait_ms": 0, "aborted": false, "interrupted": null}}]),
+    fn rejects_more_flags_than_the_allowlist() {
+        let flags: Vec<Value> = (0..32)
+            .map(|_| json!({"name": "offline", "kind": "boolean"}))
+            .collect();
+        assert!(validate(json!([{
+            "type": "invocation",
+            "status": "present",
+            "data": {
+                "intent": "command",
+                "output": "text",
+                "offline": false,
+                "flags": flags
+            }
+        }]))
+        .is_err());
+    }
+
+    #[test]

@@ -82,7 +82,24 @@ async fn store_event(
 
     let database = env.d1("DB").map_err(|_| "d1_unavailable")?;
     let received_at = std::mem::take(&mut event.received_at);
+    // The transport context is injected from the client-measured upload
+    // envelope and is expected to change across queue deliveries. Ingestion
+    // appends it last, so it is removed with a move, not cloned, while the
+    // immutable event digest is computed. The first stored snapshot remains
+    // the evidence.
+    let transport = if event
+        .contexts
+        .last()
+        .is_some_and(|context| context.context_type == "transport")
+    {
+        event.contexts.pop()
+    } else {
+        None
+    };
     let encoded = serde_json::to_vec(&event).map_err(|_| "event_digest_failed")?;
+    if let Some(transport) = transport {
+        event.contexts.push(transport);
+    }
     event.received_at = received_at;
     let ingest_digest = util::sha256_hex(&encoded);
     let mut statements = Vec::with_capacity(1 + event.contexts.len());
@@ -126,6 +143,8 @@ async fn store_event(
                     util::js_num(ordinal as i64),
                     util::js_str(&context.context_type),
                     util::js_str(&context.status),
+                    util::js_opt_num(context.version),
+                    util::js_opt_str(&context.reason),
                     util::js_opt_str(&data),
                     util::js_str(&event.id),
                     util::js_str(&ingest_digest),
