@@ -861,13 +861,187 @@ pub fn validate_report(
     })
 }
 
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    const ID: &str = "11111111-1111-4111-8111-111111111111";
+    const RECEIVED_AT: &str = "2026-01-01T00:00:00.000Z";
+
+    fn event_payload(contexts: Value) -> Value {
+        json!({
+            "invocation_id": "22222222-2222-4222-8222-222222222222",
+            "installation_id": "33333333-3333-4333-8333-333333333333",
+            "occurred_at": Utc::now().to_rfc3339(),
+            "command": "lucy install",
+            "lucy_version": "1.2.3",
+            "lucy_commit": "abcdef0",
+            "channel": "stable",
+            "os": "macos",
+            "arch": "arm64",
+            "duration_ms": 10,
+            "outcome": "success",
+            "schema_version": 1,
+            "collection_policy": "default",
+            "contexts": contexts,
+        })
+    }
+
+    fn validate(contexts: Value) -> Result<EventRecord, ValidationError> {
+        validate_event(
+            ID,
+            &event_payload(contexts),
+            &Config::default(),
+            RECEIVED_AT,
+            1,
+            None,
+        )
+    }
+
+    fn validate_with_upload(
+        contexts: Value,
+        cfg: &Config,
+        upload: &UploadInput,
+    ) -> Result<EventRecord, ValidationError> {
+        validate_event(
+            ID,
+            &event_payload(contexts),
+            cfg,
+            RECEIVED_AT,
+            1,
+            Some(upload),
+        )
+    }
+
+    #[test]
+    fn accepts_typed_observation_contexts() {
+        let event = validate(json!([
+            {
+                "type": "invocation",
+                "status": "present",
+                "version": 1,
+                "data": {
+                    "intent": "command",
+                    "output": "json_compact",
+                    "offline": false,
+                    "flags": [{"name": "json", "kind": "boolean"}, {"name": "package", "kind": "text"}],
+                    "positionals": 2
+                }
+            },
+            {
+                "type": "execution",
+                "status": "present",
+                "version": 1,
+                "data": {
+                    "phases": [
+                        {"name": "setup", "elapsed_ms": 5, "state": "complete"},
+                        {"name": "install", "elapsed_ms": 10, "state": "active"}
+                    ],
+                    "active_phase": "install",
+                    "slow": false,
+                    "http_ms": 3,
+                    "lock_ms": 1
+                }
+            },
+            {
+                "type": "prompt",
+                "status": "present",
                 "version": 1,
                 "data": {"mode": "non_interactive", "count": 0, "wait_ms": 0, "aborted": false, "interrupted": false}
+            },
+            {
+                "type": "scale",
+                "status": "present",
                 "version": 1,
+                "data": {"packages": 3, "files": 9}
+            },
+            {
+                "type": "warnings",
+                "status": "present",
                 "version": 1,
+                "data": {"recoverable": 1, "resolution_rejections": 2}
+            },
+            {
+                "type": "collection",
+                "status": "present",
                 "version": 1,
+                "data": {"local_log": true}
+            }
+        ]))
+        .unwrap();
+        assert_eq!(event.contexts.len(), 6);
+        assert!(event
+            .contexts
+            .iter()
+            .all(|context| context.version == Some(1)));
+    }
+
+    #[test]
+    fn accepts_absent_and_failed_reasons() {
+        let event = validate(json!([
+            {"type": "execution", "status": "absent", "reason": "not_reached"},
+            {"type": "invocation", "status": "failed", "reason": "observation_failed"}
+        ]))
+        .unwrap();
+        assert_eq!(event.contexts[0].reason.as_deref(), Some("not_reached"));
+        assert_eq!(event.contexts[0].data, None);
+        assert_eq!(
+            event.contexts[1].reason.as_deref(),
+            Some("observation_failed")
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_or_arbitrary_values() {
+        for contexts in [
+            json!([{"type": "invocation", "status": "present", "data": {"intent": "command", "output": "text", "offline": false, "argv": ["x"]}}]),
+            json!([{"type": "invocation", "status": "present", "data": {"intent": "command", "output": "text", "offline": false, "flags": [{"name": "argv", "kind": "text"}]}}]),
+            json!([{"type": "invocation", "status": "present", "data": {"intent": "command", "output": "yaml", "offline": false}}]),
+            json!([{"type": "execution", "status": "present", "data": {"slow": false, "phases": [{"name": "bogus", "elapsed_ms": 1, "state": "complete"}]}}]),
+            json!([{"type": "execution", "status": "present", "data": {"slow": false, "active_phase": "bogus"}}]),
+            json!([{"type": "execution", "status": "present", "data": {"slow": false, "cancel_reason": "timeout"}}]),
+            json!([{"type": "execution", "status": "present", "data": {"slow": false, "failure_kind": "unexpected"}}]),
+            json!([{"type": "prompt", "status": "present", "data": {"mode": "maybe", "count": 0, "wait_ms": 0, "aborted": false}}]),
             json!([{"type": "prompt", "status": "present", "data": {"mode": "available", "count": 0, "wait_ms": 0, "aborted": false, "interrupted": "yes"}}]),
             json!([{"type": "prompt", "status": "present", "data": {"mode": "available", "count": 0, "wait_ms": 0, "aborted": false, "interrupted": null}}]),
+        ] {
+            assert!(validate(contexts).is_err());
+        }
+    }
+
+    #[test]
+    fn rejects_out_of_range_observations() {
+        for contexts in [
+            json!([{"type": "invocation", "status": "present", "data": {"intent": "command", "output": "text", "offline": false, "positionals": 10001}}]),
+            json!([{"type": "invocation", "status": "present", "data": {"intent": "command", "output": "text", "offline": false, "positionals": -1}}]),
+            json!([{"type": "execution", "status": "present", "data": {"slow": false, "phases": [{"name": "setup", "elapsed_ms": 604800001, "state": "complete"}]}}]),
+            json!([{"type": "execution", "status": "present", "data": {"slow": false, "http_ms": 604800001}}]),
+            json!([{"type": "execution", "status": "present", "data": {"slow": false, "lock_ms": 604800001}}]),
+            json!([{"type": "prompt", "status": "present", "data": {"mode": "available", "count": 10001, "wait_ms": 0, "aborted": false}}]),
+            json!([{"type": "prompt", "status": "present", "data": {"mode": "available", "count": 0, "wait_ms": 604800001, "aborted": false}}]),
+            json!([{"type": "scale", "status": "present", "data": {"packages": 1000001}}]),
+            json!([{"type": "warnings", "status": "present", "data": {"recoverable": 10001}}]),
+        ] {
+            assert!(validate(contexts).is_err());
+        }
+    }
+
+    #[test]
+    fn rejects_more_than_24_phases() {
+        let phases: Vec<Value> = (0..25)
+            .map(|_| json!({"name": "setup", "elapsed_ms": 1, "state": "complete"}))
+            .collect();
+        assert!(validate(json!([{
+            "type": "execution",
+            "status": "present",
+            "data": {"slow": false, "phases": phases}
+        }]))
+        .is_err());
+    }
+
+    #[test]
     fn rejects_more_flags_than_the_allowlist() {
         let flags: Vec<Value> = (0..32)
             .map(|_| json!({"name": "offline", "kind": "boolean"}))
@@ -886,3 +1060,137 @@ pub fn validate_report(
     }
 
     #[test]
+    fn rejects_envelope_violations() {
+        for contexts in [
+            json!([{"type": "invocation", "status": "present", "version": 2, "data": {"intent": "command", "output": "text", "offline": false}}]),
+            json!([{"type": "invocation", "status": "present", "reason": "no_result", "data": {"intent": "command", "output": "text", "offline": false}}]),
+            json!([{"type": "invocation", "status": "absent", "reason": "observation_failed"}]),
+            json!([{"type": "invocation", "status": "failed", "reason": "no_result"}]),
+            json!([{"type": "invocation", "status": "absent", "data": {"offline": false}}]),
+            json!([{"type": "transport", "status": "present", "data": {"queue_ms": 1, "attempts": 1, "throttles": 0}}]),
+            json!([{"type": "invocation", "status": "present", "data": {"intent": "command", "output": "text", "offline": false, "extra": null}}]),
+        ] {
+            assert!(validate(contexts).is_err());
+        }
+    }
+
+    #[test]
+    fn injects_transport_from_upload() {
+        let upload = UploadInput {
+            queue_ms: 1200,
+            attempts: 2,
+            throttles: 1,
+        };
+        let event = validate_with_upload(
+            json!([{"type": "collection", "status": "present", "data": {"local_log": true}}]),
+            &Config::default(),
+            &upload,
+        )
+        .unwrap();
+        assert_eq!(event.contexts.len(), 2);
+        let transport = event.contexts.last().unwrap();
+        assert_eq!(transport.context_type, "transport");
+        assert_eq!(transport.status, "present");
+        assert_eq!(transport.version, Some(1));
+        assert_eq!(
+            transport.data,
+            Some(json!({"queue_ms": 1200, "attempts": 2, "throttles": 1}))
+        );
+    }
+
+    #[test]
+    fn rejects_upload_out_of_range() {
+        for upload in [
+            UploadInput {
+                queue_ms: -1,
+                attempts: 1,
+                throttles: 0,
+            },
+            UploadInput {
+                queue_ms: 604800001,
+                attempts: 1,
+                throttles: 0,
+            },
+            UploadInput {
+                queue_ms: 0,
+                attempts: 0,
+                throttles: 0,
+            },
+            UploadInput {
+                queue_ms: 0,
+                attempts: 1,
+                throttles: 10001,
+            },
+        ] {
+            assert!(
+                validate_with_upload(json!([]), &Config::default(), &upload).is_err(),
+                "upload {upload:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn upload_rejects_unknown_or_missing_fields() {
+        assert!(serde_json::from_value::<UploadInput>(
+            json!({"queue_ms": 1, "attempts": 1, "throttles": 0, "url": "x"})
+        )
+        .is_err());
+        assert!(
+            serde_json::from_value::<UploadInput>(json!({"queue_ms": 1, "attempts": 1})).is_err()
+        );
+    }
+
+    #[test]
+    fn enforces_total_context_limit_with_transport() {
+        let mut cfg = Config::default();
+        cfg.max_contexts = 2;
+        let upload = UploadInput {
+            queue_ms: 0,
+            attempts: 1,
+            throttles: 0,
+        };
+        let two_contexts = json!([
+            {"type": "collection", "status": "present", "data": {"local_log": true}},
+            {"type": "scale", "status": "present", "data": {"packages": 1}}
+        ]);
+        assert!(validate_with_upload(two_contexts, &cfg, &upload).is_err());
+
+        let event = validate_with_upload(
+            json!([{"type": "collection", "status": "present", "data": {"local_log": true}}]),
+            &cfg,
+            &upload,
+        )
+        .unwrap();
+        assert_eq!(event.contexts.len(), 2);
+    }
+
+    #[test]
+    fn legacy_contexts_keep_their_shape() {
+        let event = validate(json!([
+            {"type": "workspace", "status": "present", "data": {"product": "paper", "product_version": "1.20.4", "packages": 7}},
+            {"type": "java", "status": "absent"},
+            {"type": "agent", "status": "failed"}
+        ]))
+        .unwrap();
+        assert_eq!(event.contexts.len(), 3);
+        assert!(event
+            .contexts
+            .iter()
+            .all(|context| context.version.is_none() && context.reason.is_none()));
+    }
+
+    #[test]
+    fn queued_legacy_context_serialization_is_unchanged() {
+        let queued = json!({"type": "workspace", "status": "absent", "data": null});
+        let record: ContextRecord = serde_json::from_value(queued.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&record).unwrap(), queued);
+
+        let present = json!({
+            "type": "workspace",
+            "status": "present",
+            "data": {"product": "paper", "packages": 2}
+        });
+        let record: ContextRecord = serde_json::from_value(present.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&record).unwrap(), present);
+    }
+}
