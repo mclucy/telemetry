@@ -42,7 +42,12 @@ Requires `Content-Type: application/json`.
 ```json
 {
   "records": [
-    { "id": "<uuid>", "type": "event", "payload": {}, "upload": { "queue_ms": 512, "attempts": 1, "throttles": 0 } },
+    {
+      "id": "<uuid>",
+      "type": "event",
+      "payload": {},
+      "upload": { "queue_ms": 512, "attempts": 1, "throttles": 0 }
+    },
     { "id": "<uuid>", "type": "report", "payload": {} }
   ]
 }
@@ -87,17 +92,17 @@ Context item:
 
 The service validates typed fields rather than storing arbitrary JSON:
 
-| type        | fields                                                                                                                            |
-| ----------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| `workspace` | `product` (1–64 identifier chars), `product_version` and `minecraft_version` (1–64 version chars), `packages` (integer 0–1000000) |
-| `java`      | `major` (integer 1–255), `version` (1–64 version chars), `distribution` (1–64 identifier chars)                                   |
-| `agent`     | `detected` (boolean)                                                                                                              |
-| `invocation` | Intent, output mode, offline mode, an allowlist of flag names and value kinds, and optionally the positional argument count |
-| `execution` | Bounded phase durations and state, active phase, cancellation or failure category, slow-run marker, and observed HTTP and workspace lock times |
-| `prompt` | Prompt availability, count, cumulative wait, and whether a prompt was aborted |
-| `scale` | Observed package, file, and candidate counts |
-| `warnings` | Bounded recoverable warning and resolution rejection counts |
-| `collection` | Whether the invocation ID is available in the local diagnostic log |
+| type         | fields                                                                                                                                         |
+| ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `workspace`  | `product` (1–64 identifier chars), `product_version` and `minecraft_version` (1–64 version chars), `packages` (integer 0–1000000)              |
+| `java`       | `major` (integer 1–255), `version` (1–64 version chars), `distribution` (1–64 identifier chars)                                                |
+| `agent`      | `detected` (boolean)                                                                                                                           |
+| `invocation` | Intent, output mode, offline mode, an allowlist of flag names and value kinds, and optionally the positional argument count                    |
+| `execution`  | Bounded phase durations and state, active phase, cancellation or failure category, slow-run marker, and observed HTTP and workspace lock times |
+| `prompt`     | Prompt availability, count, cumulative wait, and whether a prompt was aborted                                                                  |
+| `scale`      | Observed package, file, and candidate counts                                                                                                   |
+| `warnings`   | Bounded recoverable warning and resolution rejection counts                                                                                    |
+| `collection` | Whether the invocation ID is available in the local diagnostic log                                                                             |
 
 The service derives `transport` from the record envelope. Clients cannot supply this type in `payload.contexts`. New observations carry no raw arguments, flag values, resource names, paths, URLs, environment values, or diagnostic text.
 
@@ -131,9 +136,7 @@ Response:
 ```json
 {
   "accepted": ["<uuid>"],
-  "rejected": [
-    { "id": "<uuid>", "reason": "invalid_field", "field": "payload.command" }
-  ],
+  "rejected": [{ "id": "<uuid>", "reason": "invalid_field", "field": "payload.command" }],
   "retryable": true
 }
 ```
