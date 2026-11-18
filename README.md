@@ -230,14 +230,15 @@ Expired counts should return to zero after each hourly run. The cleanup invocati
 
 ## Development
 
-Prerequisites:
+Prerequisites: Rust (pinned below), [jq](https://jqlang.github.io/jq/), and pnpm.
 
 ```sh
-cargo install worker-build --version 0.8.7 --locked
 pnpm install --frozen-lockfile
 ```
 
 `rust-toolchain.toml` pins Rust 1.91.0 and installs the `wasm32-unknown-unknown` target on first use.
+
+`pnpm build` installs the `worker-build` version matching the locked `worker` crate before compiling.
 
 Task entrypoints are pnpm scripts in `package.json`:
 
@@ -252,7 +253,7 @@ Deploys carry no secrets: the Worker has no secret bindings, so `pnpm deploy` up
 
 ## Continuous integration
 
-CI runs in GitHub Actions (`.github/workflows/deploy.yml`). Pull requests build the Worker and run a deploy dry run; pushes to `main` deploy the prebuilt Build Output. The workflow installs Rust 1.91, caches `~/.cargo` and `target/`, installs `worker-build` 0.8.7, and deploys the result with `--prebuilt`.
+CI runs in GitHub Actions (`.github/workflows/deploy.yml`). Pull requests build the Worker and run a deploy dry run; pushes to `main` deploy the prebuilt Build Output. The workflow installs Rust 1.91, caches `~/.cargo` and `target/`, runs `pnpm build` (which matches `worker-build` to the locked `worker` crate), and deploys the result with `--prebuilt`.
 
 Set `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` as repository secrets for the deploy step. The Workers Builds trigger is removed so a push is not deployed twice.
 

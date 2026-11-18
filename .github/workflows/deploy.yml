@@ -47,10 +47,7 @@ jobs:
       # Caches ~/.cargo (including the installed worker-build binary) and target/.
       - uses: Swatinem/rust-cache@v2
 
-      # A cold cache compiles worker-build (~4 minutes); a warm cache skips it.
-      - run: cargo install --locked --version 0.8.7 worker-build
-
-      - run: worker-build --release && pnpm exec vp build --mode production
+      - run: pnpm build
 
       # --dry-run sends no API requests, so this validates the bundle and the
       # Build Output rather than the live bindings.
