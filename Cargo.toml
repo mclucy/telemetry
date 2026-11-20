@@ -1,8 +1,8 @@
 [package]
 name = "lucy-telemetry"
 version = "0.1.0"
-edition = "2021"
-rust-version = "1.91"
+edition = "2024"
+rust-version = "1.100"
 publish = false
 description = "lucy's telemetry worker backend"
 license = "MIT"
@@ -14,12 +14,18 @@ crate-type = ["cdylib"]
 worker = { version = "0.9.0", features = ["d1", "queue"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-chrono = { version = "0.4", default-features = false, features = ["clock", "std", "wasmbind"] }
+chrono = { version = "0.4", default-features = false, features = [
+  "clock",
+  "std",
+  "wasmbind",
+] }
 uuid = { version = "1", default-features = false, features = ["std"] }
 sha2 = "0.11"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 regex = "1"
-flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+flate2 = { version = "1", default-features = false, features = [
+  "rust_backend",
+] }
 
 [profile.release]
 opt-level = "s"
