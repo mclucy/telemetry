@@ -2,7 +2,7 @@ use chrono::{SecondsFormat, TimeDelta, Utc};
 use futures_util::StreamExt;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use worker::{wasm_bindgen::JsValue, Error, Request, Response, Result};
+use worker::{Error, Request, Response, Result, wasm_bindgen::JsValue};
 
 pub enum BodyReadError {
     TooLarge,
@@ -32,7 +32,6 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     }
     output
 }
-
 
 pub async fn read_body_limited(
     request: &mut Request,

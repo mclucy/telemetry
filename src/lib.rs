@@ -11,8 +11,8 @@ mod sql;
 mod util;
 
 use worker::{
-    console_error, event, Context, Env, MessageBatch, Method, Request, Response, Result,
-    ScheduleContext, ScheduledEvent,
+    Context, Env, MessageBatch, Method, Request, Response, Result, ScheduleContext, ScheduledEvent,
+    console_error, event,
 };
 
 const SERVICE_NAME: &str = "lucy-telemetry";

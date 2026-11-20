@@ -1,7 +1,7 @@
 //! Report claims coordinate deletion across D1 and R2.
 
 use chrono::{SecondsFormat, TimeDelta, Utc};
-use worker::{console_error, console_log, Bucket, D1Database, Env};
+use worker::{Bucket, D1Database, Env, console_error, console_log};
 
 use crate::config::Config;
 use crate::sql;

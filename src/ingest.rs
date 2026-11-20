@@ -5,12 +5,12 @@ use std::collections::{HashMap, HashSet};
 use chrono::{DateTime, TimeDelta, Utc};
 use serde::Serialize;
 use worker::{
-    console_error, wasm_bindgen::JsValue, Env, QueueContentType, RawMessageBuilder, Request,
-    Response, SendMessage,
+    Env, QueueContentType, RawMessageBuilder, Request, Response, SendMessage, console_error,
+    wasm_bindgen::JsValue,
 };
 
 use crate::config::Config;
-use crate::models::{validate_event, validate_report, QueueMessage, ReportRecord, ValidatedReport};
+use crate::models::{QueueMessage, ReportRecord, ValidatedReport, validate_event, validate_report};
 use crate::sql;
 use crate::util;
 

@@ -1,7 +1,7 @@
 //! Queue delivery is at least once.
 
 use chrono::{DateTime, TimeDelta, Utc};
-use worker::{console_error, console_log, Env, MessageBatch, MessageExt};
+use worker::{Env, MessageBatch, MessageExt, console_error, console_log};
 
 use crate::config::Config;
 use crate::models::{EventRecord, QueueMessage, ReportRecord};

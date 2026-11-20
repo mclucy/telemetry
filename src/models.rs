@@ -972,10 +972,12 @@ mod tests {
         ]))
         .unwrap();
         assert_eq!(event.contexts.len(), 6);
-        assert!(event
-            .contexts
-            .iter()
-            .all(|context| context.version == Some(1)));
+        assert!(
+            event
+                .contexts
+                .iter()
+                .all(|context| context.version == Some(1))
+        );
     }
 
     #[test]
@@ -1033,12 +1035,14 @@ mod tests {
         let phases: Vec<Value> = (0..25)
             .map(|_| json!({"name": "setup", "elapsed_ms": 1, "state": "complete"}))
             .collect();
-        assert!(validate(json!([{
-            "type": "execution",
-            "status": "present",
-            "data": {"slow": false, "phases": phases}
-        }]))
-        .is_err());
+        assert!(
+            validate(json!([{
+                "type": "execution",
+                "status": "present",
+                "data": {"slow": false, "phases": phases}
+            }]))
+            .is_err()
+        );
     }
 
     #[test]
@@ -1046,17 +1050,19 @@ mod tests {
         let flags: Vec<Value> = (0..32)
             .map(|_| json!({"name": "offline", "kind": "boolean"}))
             .collect();
-        assert!(validate(json!([{
-            "type": "invocation",
-            "status": "present",
-            "data": {
-                "intent": "command",
-                "output": "text",
-                "offline": false,
-                "flags": flags
-            }
-        }]))
-        .is_err());
+        assert!(
+            validate(json!([{
+                "type": "invocation",
+                "status": "present",
+                "data": {
+                    "intent": "command",
+                    "output": "text",
+                    "offline": false,
+                    "flags": flags
+                }
+            }]))
+            .is_err()
+        );
     }
 
     #[test]
@@ -1131,10 +1137,12 @@ mod tests {
 
     #[test]
     fn upload_rejects_unknown_or_missing_fields() {
-        assert!(serde_json::from_value::<UploadInput>(
-            json!({"queue_ms": 1, "attempts": 1, "throttles": 0, "url": "x"})
-        )
-        .is_err());
+        assert!(
+            serde_json::from_value::<UploadInput>(
+                json!({"queue_ms": 1, "attempts": 1, "throttles": 0, "url": "x"})
+            )
+            .is_err()
+        );
         assert!(
             serde_json::from_value::<UploadInput>(json!({"queue_ms": 1, "attempts": 1})).is_err()
         );
@@ -1173,10 +1181,12 @@ mod tests {
         ]))
         .unwrap();
         assert_eq!(event.contexts.len(), 3);
-        assert!(event
-            .contexts
-            .iter()
-            .all(|context| context.version.is_none() && context.reason.is_none()));
+        assert!(
+            event
+                .contexts
+                .iter()
+                .all(|context| context.version.is_none() && context.reason.is_none())
+        );
     }
 
     #[test]
