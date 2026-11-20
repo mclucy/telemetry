@@ -397,7 +397,7 @@ fn prepare_report_record(
     received_at: &str,
     payload_bytes: i64,
 ) -> ReportRecord {
-    let body_bytes = report.body.as_bytes().len() as i64;
+    let body_bytes = report.body.len() as i64;
     let body_sha256 = util::sha256_hex(report.body.as_bytes());
     let r2_key = format!("reports/{}/{}.txt.gz", report.report_id, body_sha256);
     ReportRecord {

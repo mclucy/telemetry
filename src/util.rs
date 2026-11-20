@@ -44,12 +44,11 @@ pub async fn read_body_limited(
         }
     }
 
-    if let Ok(Some(raw_length)) = request.headers().get("content-length") {
-        if let Ok(length) = raw_length.trim().parse::<u64>() {
-            if length > max as u64 {
-                return Err(BodyReadError::TooLarge);
-            }
-        }
+    if let Ok(Some(raw_length)) = request.headers().get("content-length")
+        && let Ok(length) = raw_length.trim().parse::<u64>()
+        && length > max as u64
+    {
+        return Err(BodyReadError::TooLarge);
     }
 
     let mut stream = request.stream().map_err(|_| BodyReadError::BadRequest)?;

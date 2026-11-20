@@ -66,8 +66,7 @@ fn age_exceeds(retention_days: i64, received_at: &str) -> bool {
 fn report_recovery_days(config: &Config) -> i64 {
     config
         .report_retention_days
-        .min(sql::MAX_QUEUE_DELIVERY_DAYS)
-        .max(1)
+        .clamp(1, sql::MAX_QUEUE_DELIVERY_DAYS)
 }
 
 async fn store_event(

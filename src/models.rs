@@ -555,26 +555,26 @@ fn validate_execution_data(value: &Value) -> Result<(), ValidationError> {
             }
         }
     }
-    if let Some(active_phase) = &data.active_phase {
-        if !PHASE_NAMES.contains(&active_phase.as_str()) {
-            return Err(context_data_error());
-        }
+    if let Some(active_phase) = &data.active_phase
+        && !PHASE_NAMES.contains(&active_phase.as_str())
+    {
+        return Err(context_data_error());
     }
-    if let Some(cancel_reason) = &data.cancel_reason {
-        if !matches!(
+    if let Some(cancel_reason) = &data.cancel_reason
+        && !matches!(
             cancel_reason.as_str(),
             "prompt_aborted" | "interrupted" | "deadline" | "context_canceled"
-        ) {
-            return Err(context_data_error());
-        }
+        )
+    {
+        return Err(context_data_error());
     }
-    if let Some(failure_kind) = &data.failure_kind {
-        if !matches!(
+    if let Some(failure_kind) = &data.failure_kind
+        && !matches!(
             failure_kind.as_str(),
             "usage" | "panic" | "handled" | "command"
-        ) {
-            return Err(context_data_error());
-        }
+        )
+    {
+        return Err(context_data_error());
     }
     for elapsed in [data.http_ms, data.lock_ms].into_iter().flatten() {
         if elapsed > MAX_DURATION_MS_U64 {
@@ -733,10 +733,10 @@ pub fn validate_event(
         contexts.push(validate_upload(upload)?);
     }
 
-    if let Some(duration) = payload.duration_ms {
-        if !(0..=MAX_DURATION_MS).contains(&duration) {
-            return Err(ValidationError::new("invalid_field", "payload.duration_ms"));
-        }
+    if let Some(duration) = payload.duration_ms
+        && !(0..=MAX_DURATION_MS).contains(&duration)
+    {
+        return Err(ValidationError::new("invalid_field", "payload.duration_ms"));
     }
     if !identifier(&payload.command, 128, true)
         || !identifier(&payload.channel, 32, false)
@@ -809,7 +809,7 @@ pub fn validate_report(
         cfg.max_clock_skew_seconds,
     )?;
 
-    let body_bytes = payload.body.as_bytes().len();
+    let body_bytes = payload.body.len();
     if body_bytes == 0 || body_bytes > cfg.max_report_body_bytes {
         return Err(ValidationError::new("invalid_body_size", "payload.body"));
     }
@@ -1150,8 +1150,10 @@ mod tests {
 
     #[test]
     fn enforces_total_context_limit_with_transport() {
-        let mut cfg = Config::default();
-        cfg.max_contexts = 2;
+        let cfg = Config {
+            max_contexts: 2,
+            ..Default::default()
+        };
         let upload = UploadInput {
             queue_ms: 0,
             attempts: 1,
