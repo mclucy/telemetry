@@ -9,7 +9,7 @@
       "deleteObjectsTransition": {
         "condition": {
           "type": "Age",
-          "maxAge": 1209600
+          "maxAge": 2592000
         }
       }
     }

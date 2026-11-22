@@ -45,15 +45,12 @@ Requires `Content-Type: application/json`.
     {
       "id": "<uuid>",
       "type": "event",
-      "payload": {},
-      "upload": { "queue_ms": 512, "attempts": 1, "throttles": 0 }
+      "payload": {}
     },
     { "id": "<uuid>", "type": "report", "payload": {} }
   ]
 }
 ```
-
-`upload` is optional and applies only to events. It reports local queue residence at the upload attempt, the number of attempts for this record, and the number of earlier intake-limited attempts. It is stored as a `transport` context on first receipt. A retry can carry different upload measurements without changing the event's identity.
 
 Event payload:
 
@@ -61,7 +58,7 @@ Event payload:
 | ---------------------------------- | ----------------------------------------------------------- |
 | `invocation_id`, `installation_id` | UUID                                                        |
 | `occurred_at`                      | RFC3339, not more than the allowed clock skew in the future |
-| `command`                          | 1–128 bytes, trusted command path without arguments         |
+| `operation`                        | 1–128 bytes, trusted command path without arguments         |
 | `lucy_version`, `lucy_commit`      | up to 64 bytes; may be empty when unknown                   |
 | `channel`                          | 1–32 bytes                                                  |
 | `os`, `arch`                       | 1–64 / 1–32 bytes                                           |
@@ -69,7 +66,6 @@ Event payload:
 | `outcome`                          | `success`, `failure`, or `canceled`                         |
 | `error_code`                       | optional, up to 64 bytes (empty is accepted)                |
 | `schema_version`                   | integer 1–1000                                              |
-| `collection_policy`                | `default` or `opt_in`                                       |
 | `contexts`                         | optional array, at most 16                                  |
 
 Context item:
@@ -92,21 +88,43 @@ Context item:
 
 The service validates typed fields rather than storing arbitrary JSON:
 
-| type         | fields                                                                                                                                         |
-| ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `workspace`  | `product` (1–64 identifier chars), `product_version` and `minecraft_version` (1–64 version chars), `packages` (integer 0–1000000)              |
-| `java`       | `major` (integer 1–255), `version` (1–64 version chars), `distribution` (1–64 identifier chars)                                                |
-| `agent`      | `detected` (boolean)                                                                                                                           |
-| `invocation` | Intent, output mode, offline mode, an allowlist of flag names and value kinds, and optionally the positional argument count                    |
-| `execution`  | Bounded phase durations and state, active phase, cancellation or failure category, slow-run marker, and observed HTTP and workspace lock times |
-| `prompt`     | Prompt availability, count, cumulative wait, and whether a prompt was aborted                                                                  |
-| `scale`      | Observed package, file, and candidate counts                                                                                                   |
-| `warnings`   | Bounded recoverable warning and resolution rejection counts                                                                                    |
-| `collection` | Whether the invocation ID is available in the local diagnostic log                                                                             |
+| type         | fields                                                                                                                                                                          |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `workspace`  | `product` (1–64 identifier chars), `product_version` and `minecraft_version` (1–64 version chars), `packages` (integer 0–1000000)                                               |
+| `java`       | `major` (integer 1–255), `version` (1–64 version chars), `distribution` (1–64 identifier chars)                                                                                 |
+| `agent`      | `detected` (boolean)                                                                                                                                                            |
+| `invocation` | `intent` (`command` or `invalid_usage`) and optional bounded `arguments`                                                                                                        |
+| `execution`  | Bounded phase durations and state, `active_phase`, `cancel_reason` or failure category, optional `input_wait_ms` (integer), `files`, and observed HTTP and workspace lock times |
 
-The service derives `transport` from the record envelope. Clients cannot supply this type in `payload.contexts`. New observations carry no raw arguments, flag values, resource names, paths, URLs, environment values, or diagnostic text.
+`prompt`, `scale`, `warnings`, `collection`, and `transport` are not collected contexts. A payload may not supply them, and no record stores them.
 
-Identifier characters are ASCII alphanumerics and `._-+:`. Version strings contain at least one digit and use ASCII alphanumerics and `.+-_`.
+`active_phase` and each phase key are normalized names matching ASCII `[a-z0-9][a-z0-9_-]{0,63}`. A client replaces ASCII spaces with underscores before serializing; the backend validates the shape rather than a fixed vocabulary.
+
+Slowness is derived from `duration_ms >= 30000` in queries and the dashboard; it is not a wire or stored field.
+
+Invocation arguments:
+
+```json
+{
+  "intent": "command",
+  "arguments": [
+    { "name": "core", "kind": "selector", "value": "paper@1.21.4" },
+    { "name": "arg-1", "kind": "text" },
+    { "name": "yes", "kind": "boolean", "value": true }
+  ]
+}
+```
+
+`arguments` holds at most 32 items. Each `name` is a Cobra flag name or the positional slot `arg-N` (1-based), matching ASCII `[a-z0-9][a-z0-9-]{0,63}`. `kind` is `boolean`, `number`, `selector`, `version`, `text`, or `list`. `value` is omitted for `text` and `list`, and otherwise admits only:
+
+- a boolean;
+- a finite JSON number with magnitude at most 9007199254740991;
+- a normalized version: 1–4 dot-separated ASCII segments of 1–4 digits, or `[0-9]{2}w[0-9]{2}[a-z]`;
+- an exact safe selector: `vanilla`, `paper`, `fabric`, `folia`, `purpur`, `forge`, `neoforge`, `quilt`, `spigot`, `bukkit`, `velocity`, `waterfall`, `modrinth`, `curseforge`, `hangar`, `github`, `release`, `beta`, `alpha`, `stable`, `auto`, `latest`, `none`, `always`, `never`, `off`, `on`, or `snapshot`, optionally refined as `<selector>@<normalized version>` for example `paper@232` or `fabric@0.16.9`.
+
+The client records a value only for a parsed declaration with a normalizable type. It never sends arbitrary text, raw argv, paths, URLs, tokens, environment values, prompt input, or file contents.
+
+Non-argument identifier fields use ASCII alphanumerics and `._-+:`. Non-argument version fields contain at least one digit and use ASCII alphanumerics and `.+-_`. Argument `version` values use the stricter normalized syntax above.
 
 Examples for Java and agent context:
 
@@ -117,17 +135,16 @@ Examples for Java and agent context:
 
 Report payload:
 
-| field               | requirement                                             |
-| ------------------- | ------------------------------------------------------- |
-| `report_id`         | UUID; must equal the record `id`                        |
-| `installation_id`   | UUID                                                    |
-| `invocation_id`     | optional UUID                                           |
-| `kind`              | `failure`, `panic`, or `agent_feedback`                 |
-| `agent`, `model`    | optional, up to 128 bytes                               |
-| `created_at`        | RFC3339, not in the future beyond clock skew            |
-| `schema_version`    | integer 1–1000                                          |
-| `collection_policy` | `default` or `opt_in`                                   |
-| `body`              | sanitized UTF-8 text, non-empty, at most 64 KiB; no NUL |
+| field             | requirement                                             |
+| ----------------- | ------------------------------------------------------- |
+| `report_id`       | UUID; must equal the record `id`                        |
+| `installation_id` | UUID                                                    |
+| `invocation_id`   | optional UUID                                           |
+| `kind`            | `failure`, `panic`, or `agent_feedback`                 |
+| `agent`, `model`  | optional, up to 128 bytes                               |
+| `created_at`      | RFC3339, not in the future beyond clock skew            |
+| `schema_version`  | integer 1–1000                                          |
+| `body`            | sanitized UTF-8 text, non-empty, at most 64 KiB; no NUL |
 
 The client must filter reports before queueing. The backend filters them again before storage. Filtering is not a guarantee that all sensitive data is removed.
 
@@ -136,9 +153,7 @@ Response:
 ```json
 {
   "accepted": ["<uuid>"],
-  "rejected": [
-    { "id": "<uuid>", "reason": "invalid_field", "field": "payload.command" }
-  ],
+  "rejected": [{ "id": "<uuid>", "reason": "invalid_field", "field": "payload.operation" }],
   "retryable": true
 }
 ```
@@ -161,21 +176,20 @@ Duplicate IDs are idempotent. A repeated event ID does not create a second row. 
 
 The deployment writes one `CONFIG_JSON` text binding. Missing configuration uses the safe defaults below. Malformed or out-of-range configuration fails closed with `500 not_configured` rather than silently clamping.
 
-| field                        | default   | accepted range                                   |
-| ---------------------------- | --------- | ------------------------------------------------ |
-| `environment`                | `unknown` | 1–64 bytes                                       |
-| `max_request_bytes`          | 262144    | 1024–1048576                                     |
-| `max_records`                | 50        | 1–100                                            |
-| `max_record_bytes`           | 98304     | 1024–122880                                      |
-| `max_report_body_bytes`      | 65536     | 1–`max_record_bytes`                             |
-| `max_context_bytes`          | 8192      | 0–32768                                          |
-| `max_contexts`               | 16        | 1–32                                             |
-| `event_retention_days`       | 30        | 1–30 (hard privacy ceiling)                      |
-| `report_retention_days`      | 14        | 1–14 (hard privacy ceiling)                      |
-| `pending_report_grace_hours` | 336       | must equal `report_retention_days * 24` (24–336) |
-| `cleanup_batch_size`         | 100       | 1–500                                            |
-| `cleanup_max_batches`        | 10        | 1–100                                            |
-| `max_clock_skew_seconds`     | 604800    | 0–2592000                                        |
+| field                    | default   | accepted range       |
+| ------------------------ | --------- | -------------------- |
+| `environment`            | `unknown` | 1–64 bytes           |
+| `max_request_bytes`      | 262144    | 1024–1048576         |
+| `max_records`            | 50        | 1–100                |
+| `max_record_bytes`       | 98304     | 1024–122880          |
+| `max_report_body_bytes`  | 65536     | 1–`max_record_bytes` |
+| `max_context_bytes`      | 8192      | 0–32768              |
+| `max_contexts`           | 16        | 1–32                 |
+| `cleanup_batch_size`     | 100       | 1–500                |
+| `cleanup_max_batches`    | 10        | 1–100                |
+| `max_clock_skew_seconds` | 604800    | 0–2592000            |
+
+Record retention is not configuration. Events, their context snapshots, and report bodies expire 30 days after receipt; `CONFIG_JSON` cannot widen that window, and cleanup throughput knobs affect deletion speed only.
 
 `max_record_bytes` includes the record envelope (`id`, `type`, `payload`) and is measured as compact JSON. Queue messages are independently checked against the Cloudflare Queues per-message ceiling before they are sent.
 
@@ -186,18 +200,18 @@ The deployment writes one `CONFIG_JSON` text binding. Missing configuration uses
 | `DB`          | D1             | events, context snapshots, report metadata |
 | `REPORTS`     | R2             | private report body storage                |
 | `RECORDS`     | Queue producer | event payloads and report metadata         |
-| `CONFIG_JSON` | text           | runtime limits and retention               |
+| `CONFIG_JSON` | text           | runtime limits                             |
 
 The queue consumer is the same Worker. Its trigger and DLQ are declared in the generated Build Output and applied by `cf deploy`.
 
 ## Retention and failure behavior
 
-Retention is a privacy policy, not a capacity tuning knob. Events and contexts expire after **30 days**, reports after **14 days**. Expired records are no longer readable; scheduled D1 cleanup and R2 lifecycle deletion are asynchronous. `CONFIG_JSON` rejects longer retention and requires pending grace to match the report retention period.
+Retention is a fixed privacy policy, not a capacity tuning knob. Events, their context snapshots, and reports expire **30 days after receipt**. Expired records are no longer readable; scheduled D1 cleanup and R2 lifecycle deletion are asynchronous.
 
-- **Events/contexts:** the hourly cron deletes expired events in bounded batches; context rows are deleted first in the same atomic D1 batch.
-- **Reports:** the cron atomically claims expired `stored` rows and `pending` rows older than the report retention window as `state = deleting`, deletes their R2 objects, then tombstones the IDs and deletes metadata in one D1 transaction. Claimed rows are excluded immediately. If R2 deletion fails, the claim lease expires and the next run retries it. The pending grace equals the report retention, so an accepted report is not cleaned early.
-- **Deletion tombstones:** when retention deletes a report, its ID is tombstoned in the same transaction. A delayed queue message or client retry cannot recreate an expired report row or resurrect its body.
-- **R2 lifecycle:** an R2 lifecycle rule on the `reports/` prefix is required as a hard backstop for report bodies, including objects orphaned by a crash between R2 put and D1 insert. Its `maxAge` must be at most 14 days (`1209600` seconds); a longer rule would outlive the privacy window.
+- **Events/contexts:** the hourly cron deletes events received before the 30-day cutoff in bounded batches; context rows are deleted first in the same atomic D1 batch.
+- **Reports:** the cron atomically claims `stored` rows older than 30 days and `pending` rows older than the pending grace window as `state = deleting`, deletes their R2 objects, then tombstones the IDs and deletes metadata in one D1 transaction. Claimed rows are excluded immediately. If R2 deletion fails, the claim lease expires and the next run retries it. The pending grace is 14 days, the maximum queue delivery window, so it never exceeds the record lifetime and no message can verify a pending row after that window.
+- **Deletion tombstones:** when retention deletes a report, its ID is tombstoned in the same transaction and retained for 15 days, outliving the queue delivery window. A delayed queue message or client retry cannot recreate an expired report row or resurrect its body.
+- **R2 lifecycle:** a lifecycle rule on the `reports/` prefix is required as a hard backstop for report bodies, including objects orphaned by a crash between R2 put and D1 insert. `deploy/r2-lifecycle.example.json` sets `maxAge` to 30 days (`2592000` seconds) for that prefix only. Keep it at 30 days: a longer rule would outlive the privacy window, a shorter rule would remove bodies that a pending retry can still verify, and the rule must not cover objects outside `reports/`.
 - **R2 failure:** the report is rejected with `storage_unavailable`; no metadata or queue message is created. R2 is written before D1 and Queues.
 - **D1 failure:** the request fails closed; any R2 object without metadata is cleaned by the lifecycle rule.
 - **Queue failure:** the response is `503` with `accepted: []`. Report rows are `pending`; retries heal them only while the R2 body still exists. The DLQ captures messages that exhaust consumer retries.
@@ -207,11 +221,11 @@ Retention is a privacy policy, not a capacity tuning knob. Events and contexts e
 
 ### Pending and DLQ recovery limits
 
-Report recovery is bounded by the retention window measured from the first receipt. Expired reports are hidden immediately; scheduled cleanup deletes their metadata and bodies, with the R2 lifecycle as a backstop. Queue and DLQ retention do not extend the recovery window. Do not restore expired telemetry from backups, D1 time-travel, or a DLQ.
+Report recovery is bounded by the 30-day retention window measured from first receipt (`received_at`), not event occurrence. A pending row is removed after the 14-day queue delivery window because no message can verify it later. Expired reports are hidden immediately; scheduled cleanup deletes their metadata and bodies, with the R2 lifecycle as a backstop. Queue and DLQ retention do not extend the recovery window. Do not restore expired telemetry from backups, D1 time-travel, or a DLQ.
 
 ### Monitoring expiry backlog
 
-Cleanup is deliberately bounded: one invocation deletes at most `cleanup_batch_size * cleanup_max_batches` event rows and the same number of report rows. Never replace this with a one-off unbounded sweep; such a delete can exhaust the invocation before it finishes. Instead, compare the expired-row counts below across hourly runs. Run them with the production retention and pending values substituted for the defaults:
+Cleanup is deliberately bounded: one invocation deletes at most `cleanup_batch_size * cleanup_max_batches` event rows and the same number of report rows. Never replace this with a one-off unbounded sweep; such a delete can exhaust the invocation before it finishes. Instead, compare the expired-row counts below across hourly runs. The cutoffs match the fixed 30-day record horizon and the 14-day pending grace:
 
 ```sql
 SELECT
@@ -220,7 +234,7 @@ SELECT
     AS expired_events,
   (SELECT COUNT(*) FROM reports
      WHERE state = 'stored'
-       AND received_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-14 days'))
+       AND received_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-30 days'))
     AS expired_reports,
   (SELECT COUNT(*) FROM reports
      WHERE state = 'pending'
@@ -270,7 +284,9 @@ Deploys carry no secrets: the Worker has no secret bindings, so `pnpm deploy` up
 
 CI runs in GitHub Actions (`.github/workflows/deploy.yml`). Pull requests build the Worker and run a deploy dry run; pushes to `main` deploy the prebuilt Build Output. The workflow installs Rust, caches `~/.cargo` and `target/`, runs `pnpm build` (which matches `worker-build` to the locked `worker` crate), and deploys the result with `--prebuilt`.
 
-Apply D1 migrations before deploying code that uses the new schema. For the invocation observation migration, deploy ingestion first, then the dashboard, then release the Lucy client that emits the new contexts.
+Apply D1 migrations before deploying code that uses the new schema. `migrations/0003_operation_evidence.sql` renames stored `events.command` values to `operation` and removes the redundant stored evidence (`collection_policy`, the prompt/scale/warnings/collection/transport contexts, derived `execution.slow`, and obsolete invocation output/offline flags). It preserves the remaining historical rows, which expire on the same receipt-based horizon.
+
+This release is a breaking wire cutover, not a dual-protocol rollover. The Worker accepts only the new payload (`operation`, structured invocation arguments, no `collection_policy` or `upload`, and only the retained contexts); it has no shim for the old shape. Released alpha.9 clients still send the legacy format, so their uploads are rejected until they upgrade. Do not treat a production deploy as a safe live cutover: sequence the migration, Worker, dashboard, and client release, and expect an intake gap from clients that have not upgraded.
 
 Set `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` as repository secrets for the deploy step. The Workers Builds trigger is removed so a push is not deployed twice.
 

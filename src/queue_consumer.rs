@@ -3,7 +3,7 @@
 use chrono::{DateTime, TimeDelta, Utc};
 use worker::{Env, MessageBatch, MessageExt, console_error, console_log};
 
-use crate::config::Config;
+use crate::config::{Config, RECORD_RETENTION_DAYS};
 use crate::models::{EventRecord, QueueMessage, ReportRecord};
 use crate::sql;
 use crate::util;
@@ -30,7 +30,7 @@ pub async fn handle(batch: MessageBatch<serde_json::Value>, env: &Env) -> worker
         let result = match parsed {
             Ok(QueueMessage::Event { v, event }) => {
                 if v == QueueMessage::VERSION {
-                    store_event(event, &config, env).await
+                    store_event(event, env).await
                 } else {
                     Err("unsupported_message_version")
                 }
@@ -63,42 +63,19 @@ fn age_exceeds(retention_days: i64, received_at: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn report_recovery_days(config: &Config) -> i64 {
-    config
-        .report_retention_days
-        .clamp(1, sql::MAX_QUEUE_DELIVERY_DAYS)
+fn report_recovery_days() -> i64 {
+    RECORD_RETENTION_DAYS.clamp(1, sql::MAX_QUEUE_DELIVERY_DAYS)
 }
 
-async fn store_event(
-    mut event: EventRecord,
-    config: &Config,
-    env: &Env,
-) -> std::result::Result<(), &'static str> {
-    if age_exceeds(config.event_retention_days, &event.received_at) {
+async fn store_event(mut event: EventRecord, env: &Env) -> std::result::Result<(), &'static str> {
+    if age_exceeds(RECORD_RETENTION_DAYS, &event.received_at) {
         console_log!("queue_event_expired");
         return Ok(());
     }
 
     let database = env.d1("DB").map_err(|_| "d1_unavailable")?;
     let received_at = std::mem::take(&mut event.received_at);
-    // The transport context is injected from the client-measured upload
-    // envelope and is expected to change across queue deliveries. Ingestion
-    // appends it last, so it is removed with a move, not cloned, while the
-    // immutable event digest is computed. The first stored snapshot remains
-    // the evidence.
-    let transport = if event
-        .contexts
-        .last()
-        .is_some_and(|context| context.context_type == "transport")
-    {
-        event.contexts.pop()
-    } else {
-        None
-    };
     let encoded = serde_json::to_vec(&event).map_err(|_| "event_digest_failed")?;
-    if let Some(transport) = transport {
-        event.contexts.push(transport);
-    }
     event.received_at = received_at;
     let ingest_digest = util::sha256_hex(&encoded);
     let mut statements = Vec::with_capacity(1 + event.contexts.len());
@@ -112,7 +89,7 @@ async fn store_event(
                 util::js_str(&event.invocation_id),
                 util::js_str(&event.occurred_at),
                 util::js_str(&event.received_at),
-                util::js_str(&event.command),
+                util::js_str(&event.operation),
                 util::js_str(&event.lucy_version),
                 util::js_str(&event.lucy_commit),
                 util::js_str(&event.channel),
@@ -122,7 +99,6 @@ async fn store_event(
                 util::js_str(&event.outcome),
                 util::js_opt_str(&event.error_code),
                 util::js_num(event.schema_version),
-                util::js_str(&event.collection_policy),
                 util::js_num(event.payload_bytes),
                 util::js_str(&ingest_digest),
             ])
@@ -207,7 +183,7 @@ async fn store_report(
     config: &Config,
     env: &Env,
 ) -> std::result::Result<(), &'static str> {
-    if age_exceeds(report_recovery_days(config), &report.received_at) {
+    if age_exceeds(report_recovery_days(), &report.received_at) {
         console_log!("queue_report_expired");
         return Ok(());
     }
@@ -251,7 +227,6 @@ async fn store_report(
             util::js_str(&report.created_at),
             util::js_str(&report.received_at),
             util::js_num(report.schema_version),
-            util::js_str(&report.collection_policy),
             util::js_str(&report.r2_key),
             util::js_num(report.body_bytes),
             util::js_str(&report.body_sha256),

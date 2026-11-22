@@ -3,7 +3,7 @@
 use chrono::{SecondsFormat, TimeDelta, Utc};
 use worker::{Bucket, D1Database, Env, console_error, console_log};
 
-use crate::config::Config;
+use crate::config::{Config, PENDING_REPORT_GRACE_HOURS, RECORD_RETENTION_DAYS};
 use crate::sql;
 use crate::util;
 
@@ -12,7 +12,7 @@ use crate::util;
 const DELETE_CLAIM_LEASE_MINUTES: i64 = 30;
 
 /// Outlives the maximum queue delivery window after a report is deleted.
-const REPORT_TOMBSTONE_RETENTION_DAYS: i64 = 15;
+const REPORT_TOMBSTONE_RETENTION_DAYS: i64 = sql::MAX_QUEUE_DELIVERY_DAYS + 1;
 
 /// Only the current and previous hour are used. Two days covers delayed
 /// retries.
@@ -94,19 +94,6 @@ fn cutoff_minutes(minutes: i64) -> String {
     (Utc::now() - TimeDelta::minutes(minutes)).to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
-/// A pending row shares its body lifetime. Cap the grace by body retention and
-/// by the maximum delivery window; after that window, no message can verify
-/// the row.
-fn pending_report_cutoff_hours(config: &Config) -> i64 {
-    let body_retention_hours = config.report_retention_days.saturating_mul(24);
-    let delivery_hours = sql::MAX_QUEUE_DELIVERY_DAYS.saturating_mul(24);
-    config
-        .pending_report_grace_hours
-        .min(body_retention_hours)
-        .min(delivery_hours)
-        .max(1)
-}
-
 fn cleanup_capacity(config: &Config) -> usize {
     config
         .cleanup_batch_size
@@ -117,7 +104,7 @@ async fn cleanup_events(
     database: &D1Database,
     config: &Config,
 ) -> std::result::Result<usize, &'static str> {
-    let cutoff = util::cutoff_rfc3339(config.event_retention_days);
+    let cutoff = util::cutoff_rfc3339(RECORD_RETENTION_DAYS);
     let mut total = 0usize;
 
     for _ in 0..config.cleanup_max_batches {
@@ -162,7 +149,7 @@ async fn log_event_backlog(
     database: &D1Database,
     config: &Config,
 ) -> std::result::Result<(), &'static str> {
-    let cutoff = util::cutoff_rfc3339(config.event_retention_days);
+    let cutoff = util::cutoff_rfc3339(RECORD_RETENTION_DAYS);
     let cap = cleanup_capacity(config).saturating_add(1);
     let row: Option<CountRow> = database
         .prepare(sql::COUNT_EXPIRED_EVENTS)
@@ -186,8 +173,8 @@ async fn log_report_backlog(
     database: &D1Database,
     config: &Config,
 ) -> std::result::Result<(), &'static str> {
-    let stored_cutoff = util::cutoff_rfc3339(config.report_retention_days);
-    let pending_cutoff = util::cutoff_rfc3339_hours(pending_report_cutoff_hours(config));
+    let stored_cutoff = util::cutoff_rfc3339(RECORD_RETENTION_DAYS);
+    let pending_cutoff = util::cutoff_rfc3339_hours(PENDING_REPORT_GRACE_HOURS);
     let stale_cutoff = cutoff_minutes(DELETE_CLAIM_LEASE_MINUTES);
     let cap = cleanup_capacity(config).saturating_add(1);
     let row: Option<ReportBacklogRow> = database
@@ -223,8 +210,8 @@ async fn cleanup_reports(
     bucket: &Bucket,
     config: &Config,
 ) -> std::result::Result<usize, &'static str> {
-    let stored_cutoff = util::cutoff_rfc3339(config.report_retention_days);
-    let pending_cutoff = util::cutoff_rfc3339_hours(pending_report_cutoff_hours(config));
+    let stored_cutoff = util::cutoff_rfc3339(RECORD_RETENTION_DAYS);
+    let pending_cutoff = util::cutoff_rfc3339_hours(PENDING_REPORT_GRACE_HOURS);
     let stale_cutoff = cutoff_minutes(DELETE_CLAIM_LEASE_MINUTES);
     let mut total = 0usize;
 

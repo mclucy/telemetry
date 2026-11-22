@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use chrono::{DateTime, SecondsFormat, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -8,60 +10,44 @@ use crate::config::Config;
 const MAX_DURATION_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 const MAX_DURATION_MS_U64: u64 = MAX_DURATION_MS as u64;
 const MAX_SCHEMA_VERSION: i64 = 1000;
-const MAX_COUNT: u64 = 10_000;
-const MAX_SCALE: u64 = 1_000_000;
+/// Bound for counted work (packages, files), independent of elapsed time.
+const MAX_ITEMS: u64 = 1_000_000;
+const MAX_ARGUMENTS: usize = 32;
+const MAX_ARGUMENT_NAME: usize = 64;
+const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+const MAX_PHASES: usize = 24;
 
-/// Phase identifiers are a fixed wire vocabulary. `active_phase` is checked
-/// against the same set, so no arbitrary stage string is ever stored.
-const PHASE_NAMES: [&str; 12] = [
-    "setup",
-    "command",
-    "server",
-    "packages",
-    "install",
-    "python_environment",
-    "download_pack",
-    "download_archive",
-    "files",
-    "loader_installer",
-    "adoption",
-    "identification",
-];
-
-/// Flag names are an allowlist. Only names and value kinds are collected;
-/// values, tokens, and paths never are.
-const FLAG_NAMES: [&str; 31] = [
-    "offline",
-    "json",
-    "json-compact",
-    "no-interactive",
-    "no-style",
-    "no-color",
-    "server",
-    "core",
-    "core-version",
-    "minecraft",
-    "locked",
-    "yes",
-    "interactive",
-    "dry-run",
-    "all",
-    "provider",
-    "source",
-    "loader",
+/// Selectors and lifecycle stages whose spelling is meaningful. A selector may
+/// carry one `@`-qualified version (`paper@232`); no other free text is allowed.
+const SELECTORS: [&str; 28] = [
+    "vanilla",
+    "paper",
+    "fabric",
+    "folia",
+    "purpur",
+    "forge",
+    "neoforge",
+    "quilt",
+    "spigot",
+    "bukkit",
+    "velocity",
+    "waterfall",
+    "modrinth",
+    "curseforge",
+    "hangar",
+    "github",
+    "release",
+    "beta",
+    "alpha",
+    "stable",
+    "auto",
     "latest",
-    "version",
-    "channel",
-    "force",
-    "output",
-    "path",
-    "directory",
-    "name",
-    "package",
-    "java",
-    "log-file",
-    "log-level",
-    "print-logs",
+    "none",
+    "always",
+    "never",
+    "off",
+    "on",
+    "snapshot",
 ];
 
 const ABSENT_REASONS: [&str; 4] = ["not_observed", "not_reached", "not_applicable", "no_result"];
@@ -74,32 +60,22 @@ pub struct IngestRequest {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RawRecord {
     pub id: String,
     #[serde(rename = "type")]
     pub record_type: String,
     pub payload: Value,
-    /// Client-measured queue residence for an event record. Admission injects
-    /// it as a `transport` context; it is not server receipt timing, and a
-    /// payload may not supply a `transport` context directly.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub upload: Option<UploadInput>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct UploadInput {
-    pub queue_ms: i64,
-    pub attempts: i64,
-    pub throttles: i64,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EventPayload {
     pub invocation_id: String,
     pub installation_id: String,
     pub occurred_at: String,
-    pub command: String,
+    /// Trusted command path; low-cardinality operation name for aggregates.
+    pub operation: String,
     pub lucy_version: String,
     pub lucy_commit: String,
     pub channel: String,
@@ -111,7 +87,6 @@ pub struct EventPayload {
     #[serde(default)]
     pub error_code: Option<String>,
     pub schema_version: i64,
-    pub collection_policy: String,
     #[serde(default)]
     pub contexts: Vec<ContextInput>,
 }
@@ -130,6 +105,7 @@ pub struct ContextInput {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReportPayload {
     pub report_id: String,
     pub installation_id: String,
@@ -142,7 +118,6 @@ pub struct ReportPayload {
     pub model: Option<String>,
     pub created_at: String,
     pub schema_version: i64,
-    pub collection_policy: String,
     pub body: String,
 }
 
@@ -167,7 +142,7 @@ pub struct EventRecord {
     pub invocation_id: String,
     pub occurred_at: String,
     pub received_at: String,
-    pub command: String,
+    pub operation: String,
     pub lucy_version: String,
     pub lucy_commit: String,
     pub channel: String,
@@ -177,7 +152,6 @@ pub struct EventRecord {
     pub outcome: String,
     pub error_code: Option<String>,
     pub schema_version: i64,
-    pub collection_policy: String,
     pub payload_bytes: i64,
     pub contexts: Vec<ContextRecord>,
 }
@@ -192,7 +166,6 @@ pub struct ValidatedReport {
     pub model: Option<String>,
     pub created_at: String,
     pub schema_version: i64,
-    pub collection_policy: String,
     pub body: String,
 }
 
@@ -207,7 +180,6 @@ pub struct ReportRecord {
     pub created_at: String,
     pub received_at: String,
     pub schema_version: i64,
-    pub collection_policy: String,
     pub r2_key: String,
     pub body_bytes: i64,
     pub body_sha256: String,
@@ -307,21 +279,12 @@ fn context_data_error() -> ValidationError {
     ValidationError::new("invalid_context", "contexts.data")
 }
 
-/// A payload may only carry observation contexts. `transport` is injected by
-/// ingestion from the client-measured upload envelope, so a payload may not
-/// set it directly.
+/// A payload may carry only the retained observation contexts. Retired
+/// contexts are rejected rather than silently ignored.
 fn is_payload_context_type(kind: &str) -> bool {
     matches!(
         kind,
-        "workspace"
-            | "java"
-            | "agent"
-            | "invocation"
-            | "execution"
-            | "prompt"
-            | "scale"
-            | "warnings"
-            | "collection"
+        "workspace" | "java" | "agent" | "invocation" | "execution"
     )
 }
 
@@ -396,13 +359,9 @@ fn validate_context(input: ContextInput, cfg: &Config) -> Result<ContextRecord, 
 
 fn validate_context_data(kind: &str, value: &Value) -> Result<(), ValidationError> {
     match kind {
-        "workspace" | "java" | "agent" => validate_legacy_context_data(kind, value),
+        "workspace" | "java" | "agent" => validate_observation_context_data(kind, value),
         "invocation" => validate_invocation_data(value),
         "execution" => validate_execution_data(value),
-        "prompt" => validate_prompt_data(value),
-        "scale" => validate_scale_data(value),
-        "warnings" => validate_warnings_data(value),
-        "collection" => validate_collection_data(value),
         _ => Err(context_data_error()),
     }
 }
@@ -421,21 +380,17 @@ fn strict_context_object(value: &Value) -> Result<(), ValidationError> {
 #[serde(deny_unknown_fields)]
 struct InvocationData {
     intent: String,
-    output: String,
-    /// Effective state only; presence and type are the contract.
-    #[allow(dead_code)]
-    offline: bool,
     #[serde(default)]
-    flags: Option<Vec<InvocationFlag>>,
-    #[serde(default)]
-    positionals: Option<u64>,
+    arguments: Option<Vec<InvocationArgument>>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct InvocationFlag {
+struct InvocationArgument {
     name: String,
     kind: String,
+    #[serde(default)]
+    value: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -449,9 +404,10 @@ struct ExecutionData {
     cancel_reason: Option<String>,
     #[serde(default)]
     failure_kind: Option<String>,
-    /// Slow-run marker; the type check is the contract.
-    #[allow(dead_code)]
-    slow: bool,
+    #[serde(default)]
+    input_wait_ms: Option<u64>,
+    #[serde(default)]
+    files: Option<u64>,
     #[serde(default)]
     http_ms: Option<u64>,
     #[serde(default)]
@@ -466,88 +422,128 @@ struct ExecutionPhase {
     state: String,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PromptData {
-    mode: String,
-    count: u64,
-    wait_ms: u64,
-    #[allow(dead_code)]
-    aborted: bool,
-    /// Set by the client when cancellation occurred while a form was open.
-    #[serde(default)]
-    #[allow(dead_code)]
-    interrupted: Option<bool>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ScaleData {
-    #[serde(default)]
-    packages: Option<u64>,
-    #[serde(default)]
-    requested_packages: Option<u64>,
-    #[serde(default)]
-    files: Option<u64>,
-    #[serde(default)]
-    completed_files: Option<u64>,
-    #[serde(default)]
-    candidates: Option<u64>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct WarningsData {
-    recoverable: u64,
-    #[serde(default)]
-    resolution_rejections: Option<u64>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CollectionData {
-    #[allow(dead_code)]
-    local_log: bool,
-}
-
 fn validate_invocation_data(value: &Value) -> Result<(), ValidationError> {
     strict_context_object(value)?;
     let data = InvocationData::deserialize(value).map_err(|_| context_data_error())?;
-    if !matches!(data.intent.as_str(), "command" | "invalid_usage")
-        || !matches!(data.output.as_str(), "text" | "json" | "json_compact")
-    {
+    if !matches!(data.intent.as_str(), "command" | "invalid_usage") {
         return Err(context_data_error());
     }
-    if data.positionals.is_some_and(|count| count > MAX_COUNT) {
+    let Some(arguments) = &data.arguments else {
+        return Ok(());
+    };
+    if arguments.len() > MAX_ARGUMENTS {
         return Err(context_data_error());
     }
-    if let Some(flags) = &data.flags {
-        if flags.len() > FLAG_NAMES.len() {
+    let mut names = HashSet::with_capacity(arguments.len());
+    for argument in arguments {
+        if !valid_argument_name(&argument.name)
+            || !names.insert(argument.name.as_str())
+            || !safe_argument_value(&argument.kind, argument.value.as_ref())
+        {
             return Err(context_data_error());
-        }
-        for flag in flags {
-            if !FLAG_NAMES.contains(&flag.name.as_str())
-                || !matches!(
-                    flag.kind.as_str(),
-                    "boolean" | "number" | "selector" | "version" | "text" | "list"
-                )
-            {
-                return Err(context_data_error());
-            }
         }
     }
     Ok(())
+}
+
+/// Names are Cobra flag names or one-based `arg-N` positional slots. Both are
+/// bounded lowercase identifiers, so a raw command line cannot be smuggled in.
+fn valid_argument_name(value: &str) -> bool {
+    if value.is_empty() || value.len() > MAX_ARGUMENT_NAME {
+        return false;
+    }
+    if let Some(slot) = value.strip_prefix("arg-") {
+        return !slot.is_empty()
+            && !slot.starts_with('0')
+            && slot.bytes().all(|byte| byte.is_ascii_digit());
+    }
+    let mut bytes = value.bytes();
+    let first = bytes.next().unwrap();
+    (first.is_ascii_lowercase() || first.is_ascii_digit())
+        && bytes.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
+/// Only parsed, typed values cross the wire. Text and list values are omitted;
+/// their names still describe the command shape.
+fn safe_argument_value(kind: &str, value: Option<&Value>) -> bool {
+    match kind {
+        "boolean" => value.is_some_and(Value::is_boolean),
+        "number" => value.is_some_and(safe_number),
+        "selector" => value.and_then(Value::as_str).is_some_and(safe_selector),
+        "version" => value.and_then(Value::as_str).is_some_and(safe_version),
+        "text" | "list" => value.is_none(),
+        _ => false,
+    }
+}
+
+fn safe_number(value: &Value) -> bool {
+    if let Some(number) = value.as_i64() {
+        return number.unsigned_abs() <= MAX_SAFE_INTEGER;
+    }
+    if let Some(number) = value.as_u64() {
+        return number <= MAX_SAFE_INTEGER;
+    }
+    value
+        .as_f64()
+        .is_some_and(|number| number.is_finite() && number.abs() <= MAX_SAFE_INTEGER as f64)
+}
+
+fn safe_selector(value: &str) -> bool {
+    match value.split_once('@') {
+        Some((selector, version)) => SELECTORS.contains(&selector) && safe_version(version),
+        None => SELECTORS.contains(&value),
+    }
+}
+
+/// Version segments are 1-4 digits, at most four segments; Minecraft snapshot
+/// versions use the `YYwWWx` form.
+fn safe_version(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.len() == 6
+        && bytes[0].is_ascii_digit()
+        && bytes[1].is_ascii_digit()
+        && bytes[2] == b'w'
+        && bytes[3].is_ascii_digit()
+        && bytes[4].is_ascii_digit()
+        && bytes[5].is_ascii_lowercase()
+    {
+        return true;
+    }
+    let mut segments = 0;
+    for segment in value.split('.') {
+        segments += 1;
+        if segments > 4
+            || segment.is_empty()
+            || segment.len() > 4
+            || !segment.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return false;
+        }
+    }
+    segments > 0
+}
+
+fn valid_phase_name(value: &str) -> bool {
+    if value.is_empty() || value.len() > 64 {
+        return false;
+    }
+    let mut bytes = value.bytes();
+    let first = bytes.next().unwrap();
+    (first.is_ascii_lowercase() || first.is_ascii_digit())
+        && bytes.all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_' || byte == b'-'
+        })
 }
 
 fn validate_execution_data(value: &Value) -> Result<(), ValidationError> {
     strict_context_object(value)?;
     let data = ExecutionData::deserialize(value).map_err(|_| context_data_error())?;
     if let Some(phases) = &data.phases {
-        if phases.len() > 24 {
+        if phases.len() > MAX_PHASES {
             return Err(context_data_error());
         }
         for phase in phases {
-            if !PHASE_NAMES.contains(&phase.name.as_str())
+            if !valid_phase_name(&phase.name)
                 || phase.elapsed_ms > MAX_DURATION_MS_U64
                 || !matches!(phase.state.as_str(), "complete" | "active")
             {
@@ -556,7 +552,7 @@ fn validate_execution_data(value: &Value) -> Result<(), ValidationError> {
         }
     }
     if let Some(active_phase) = &data.active_phase
-        && !PHASE_NAMES.contains(&active_phase.as_str())
+        && !valid_phase_name(active_phase)
     {
         return Err(context_data_error());
     }
@@ -576,68 +572,21 @@ fn validate_execution_data(value: &Value) -> Result<(), ValidationError> {
     {
         return Err(context_data_error());
     }
-    for elapsed in [data.http_ms, data.lock_ms].into_iter().flatten() {
+    for elapsed in [data.http_ms, data.lock_ms, data.input_wait_ms]
+        .into_iter()
+        .flatten()
+    {
         if elapsed > MAX_DURATION_MS_U64 {
             return Err(context_data_error());
         }
     }
-    Ok(())
-}
-
-fn validate_prompt_data(value: &Value) -> Result<(), ValidationError> {
-    strict_context_object(value)?;
-    let data = PromptData::deserialize(value).map_err(|_| context_data_error())?;
-    if !matches!(
-        data.mode.as_str(),
-        "available" | "non_interactive" | "no_terminal" | "unknown"
-    ) || data.count > MAX_COUNT
-        || data.wait_ms > MAX_DURATION_MS_U64
-    {
+    if data.files.is_some_and(|files| files > MAX_ITEMS) {
         return Err(context_data_error());
     }
     Ok(())
 }
 
-fn validate_scale_data(value: &Value) -> Result<(), ValidationError> {
-    strict_context_object(value)?;
-    let data = ScaleData::deserialize(value).map_err(|_| context_data_error())?;
-    for count in [
-        data.packages,
-        data.requested_packages,
-        data.files,
-        data.completed_files,
-        data.candidates,
-    ]
-    .into_iter()
-    .flatten()
-    {
-        if count > MAX_SCALE {
-            return Err(context_data_error());
-        }
-    }
-    Ok(())
-}
-
-fn validate_warnings_data(value: &Value) -> Result<(), ValidationError> {
-    strict_context_object(value)?;
-    let data = WarningsData::deserialize(value).map_err(|_| context_data_error())?;
-    if data.recoverable > MAX_COUNT
-        || data
-            .resolution_rejections
-            .is_some_and(|count| count > MAX_COUNT)
-    {
-        return Err(context_data_error());
-    }
-    Ok(())
-}
-
-fn validate_collection_data(value: &Value) -> Result<(), ValidationError> {
-    strict_context_object(value)?;
-    CollectionData::deserialize(value).map_err(|_| context_data_error())?;
-    Ok(())
-}
-
-fn validate_legacy_context_data(kind: &str, value: &Value) -> Result<(), ValidationError> {
+fn validate_observation_context_data(kind: &str, value: &Value) -> Result<(), ValidationError> {
     let fields = value.as_object().ok_or_else(context_data_error)?;
     for (name, value) in fields {
         let valid = match (kind, name.as_str()) {
@@ -652,7 +601,7 @@ fn validate_legacy_context_data(kind: &str, value: &Value) -> Result<(), Validat
                             .all(|b| b.is_ascii_alphanumeric() || b".+-_".contains(&b))
                 })
             }
-            ("workspace", "packages") => value.as_u64().is_some_and(|n| n <= 1_000_000),
+            ("workspace", "packages") => value.as_u64().is_some_and(|n| n <= MAX_ITEMS),
             ("java", "major") => value.as_u64().is_some_and(|n| n > 0 && n <= 255),
             ("agent", "detected") => value.is_boolean(),
             _ => false,
@@ -662,32 +611,6 @@ fn validate_legacy_context_data(kind: &str, value: &Value) -> Result<(), Validat
         }
     }
     Ok(())
-}
-
-/// The upload envelope becomes the injected `transport` context. Its values
-/// are client-measured bounded counters; it never includes payload bytes,
-/// tokens, or text.
-fn validate_upload(upload: &UploadInput) -> Result<ContextRecord, ValidationError> {
-    if !(0..=MAX_DURATION_MS).contains(&upload.queue_ms) {
-        return Err(ValidationError::new("invalid_field", "upload.queue_ms"));
-    }
-    if !(1..=10_000).contains(&upload.attempts) {
-        return Err(ValidationError::new("invalid_field", "upload.attempts"));
-    }
-    if !(0..=10_000).contains(&upload.throttles) {
-        return Err(ValidationError::new("invalid_field", "upload.throttles"));
-    }
-    Ok(ContextRecord {
-        context_type: "transport".to_string(),
-        status: "present".to_string(),
-        version: Some(1),
-        reason: None,
-        data: Some(serde_json::json!({
-            "queue_ms": upload.queue_ms,
-            "attempts": upload.attempts,
-            "throttles": upload.throttles,
-        })),
-    })
 }
 
 fn identifier(value: &str, max: usize, spaces: bool) -> bool {
@@ -704,7 +627,6 @@ pub fn validate_event(
     cfg: &Config,
     received_at: &str,
     payload_bytes: i64,
-    upload: Option<&UploadInput>,
 ) -> Result<EventRecord, ValidationError> {
     let payload: EventPayload = serde_json::from_value(payload.clone())
         .map_err(|_| ValidationError::new("invalid_payload", "payload"))?;
@@ -718,19 +640,15 @@ pub fn validate_event(
         cfg.max_clock_skew_seconds,
     )?;
 
-    let injected = if upload.is_some() { 1 } else { 0 };
-    if payload.contexts.len() > cfg.max_contexts.saturating_sub(injected) {
+    if payload.contexts.len() > cfg.max_contexts {
         return Err(ValidationError::new(
             "too_many_contexts",
             "payload.contexts",
         ));
     }
-    let mut contexts = Vec::with_capacity(payload.contexts.len() + injected);
+    let mut contexts = Vec::with_capacity(payload.contexts.len());
     for context in payload.contexts {
         contexts.push(validate_context(context, cfg)?);
-    }
-    if let Some(upload) = upload {
-        contexts.push(validate_upload(upload)?);
     }
 
     if let Some(duration) = payload.duration_ms
@@ -738,7 +656,7 @@ pub fn validate_event(
     {
         return Err(ValidationError::new("invalid_field", "payload.duration_ms"));
     }
-    if !identifier(&payload.command, 128, true)
+    if !identifier(&payload.operation, 128, true)
         || !identifier(&payload.channel, 32, false)
         || !identifier(&payload.os, 64, false)
         || !identifier(&payload.arch, 32, false)
@@ -749,7 +667,6 @@ pub fn validate_event(
             .as_deref()
             .is_some_and(|v| !v.is_empty() && !identifier(v, 64, false))
         || !matches!(payload.outcome.as_str(), "success" | "failure" | "canceled")
-        || !matches!(payload.collection_policy.as_str(), "default" | "opt_in")
     {
         return Err(ValidationError::new("invalid_field", "payload"));
     }
@@ -760,7 +677,7 @@ pub fn validate_event(
         invocation_id,
         occurred_at,
         received_at: received_at.to_string(),
-        command: required_string(&payload.command, "payload.command", 128)?,
+        operation: required_string(&payload.operation, "payload.operation", 128)?,
         lucy_version: bounded_string(&payload.lucy_version, "payload.lucy_version", 64)?,
         lucy_commit: bounded_string(&payload.lucy_commit, "payload.lucy_commit", 64)?,
         channel: required_string(&payload.channel, "payload.channel", 32)?,
@@ -770,11 +687,6 @@ pub fn validate_event(
         outcome: required_string(&payload.outcome, "payload.outcome", 32)?,
         error_code: optional_string(&payload.error_code, "payload.error_code", 64)?,
         schema_version: validate_schema_version(payload.schema_version)?,
-        collection_policy: required_string(
-            &payload.collection_policy,
-            "payload.collection_policy",
-            64,
-        )?,
         payload_bytes,
         contexts,
     })
@@ -816,12 +728,6 @@ pub fn validate_report(
     if payload.body.contains('\0') {
         return Err(ValidationError::new("invalid_body", "payload.body"));
     }
-    if !matches!(payload.collection_policy.as_str(), "default" | "opt_in") {
-        return Err(ValidationError::new(
-            "invalid_field",
-            "payload.collection_policy",
-        ));
-    }
     for value in [&payload.agent, &payload.model].into_iter().flatten() {
         if value.len() > 128
             || !value
@@ -852,11 +758,6 @@ pub fn validate_report(
         model: optional_string(&payload.model, "payload.model", 128)?,
         created_at,
         schema_version: validate_schema_version(payload.schema_version)?,
-        collection_policy: required_string(
-            &payload.collection_policy,
-            "payload.collection_policy",
-            64,
-        )?,
         body,
     })
 }
@@ -875,7 +776,7 @@ mod tests {
             "invocation_id": "22222222-2222-4222-8222-222222222222",
             "installation_id": "33333333-3333-4333-8333-333333333333",
             "occurred_at": Utc::now().to_rfc3339(),
-            "command": "lucy install",
+            "operation": "lucy install",
             "lucy_version": "1.2.3",
             "lucy_commit": "abcdef0",
             "channel": "stable",
@@ -884,9 +785,26 @@ mod tests {
             "duration_ms": 10,
             "outcome": "success",
             "schema_version": 1,
-            "collection_policy": "default",
             "contexts": contexts,
         })
+    }
+
+    fn invocation(data: Value) -> Value {
+        json!([{
+            "type": "invocation",
+            "status": "present",
+            "version": 1,
+            "data": data,
+        }])
+    }
+
+    fn execution(data: Value) -> Value {
+        json!([{
+            "type": "execution",
+            "status": "present",
+            "version": 1,
+            "data": data,
+        }])
     }
 
     fn validate(contexts: Value) -> Result<EventRecord, ValidationError> {
@@ -896,22 +814,6 @@ mod tests {
             &Config::default(),
             RECEIVED_AT,
             1,
-            None,
-        )
-    }
-
-    fn validate_with_upload(
-        contexts: Value,
-        cfg: &Config,
-        upload: &UploadInput,
-    ) -> Result<EventRecord, ValidationError> {
-        validate_event(
-            ID,
-            &event_payload(contexts),
-            cfg,
-            RECEIVED_AT,
-            1,
-            Some(upload),
         )
     }
 
@@ -924,10 +826,15 @@ mod tests {
                 "version": 1,
                 "data": {
                     "intent": "command",
-                    "output": "json_compact",
-                    "offline": false,
-                    "flags": [{"name": "json", "kind": "boolean"}, {"name": "package", "kind": "text"}],
-                    "positionals": 2
+                    "arguments": [
+                        {"name": "json", "kind": "boolean", "value": true},
+                        {"name": "package", "kind": "text"},
+                        {"name": "packages", "kind": "list"},
+                        {"name": "retries", "kind": "number", "value": 3},
+                        {"name": "core", "kind": "selector", "value": "paper@232"},
+                        {"name": "version", "kind": "version", "value": "1.20.4"},
+                        {"name": "arg-1", "kind": "text"}
+                    ]
                 }
             },
             {
@@ -940,44 +847,74 @@ mod tests {
                         {"name": "install", "elapsed_ms": 10, "state": "active"}
                     ],
                     "active_phase": "install",
-                    "slow": false,
+                    "input_wait_ms": 250,
+                    "files": 9,
                     "http_ms": 3,
                     "lock_ms": 1
                 }
             },
             {
-                "type": "prompt",
+                "type": "workspace",
                 "status": "present",
                 "version": 1,
-                "data": {"mode": "non_interactive", "count": 0, "wait_ms": 0, "aborted": false, "interrupted": false}
+                "data": {"product": "paper", "product_version": "1.20.4", "packages": 3}
             },
             {
-                "type": "scale",
+                "type": "java",
                 "status": "present",
                 "version": 1,
-                "data": {"packages": 3, "files": 9}
+                "data": {"distribution": "temurin", "version": "21.0.1", "major": 21}
             },
             {
-                "type": "warnings",
+                "type": "agent",
                 "status": "present",
                 "version": 1,
-                "data": {"recoverable": 1, "resolution_rejections": 2}
-            },
-            {
-                "type": "collection",
-                "status": "present",
-                "version": 1,
-                "data": {"local_log": true}
+                "data": {"detected": false}
             }
         ]))
         .unwrap();
-        assert_eq!(event.contexts.len(), 6);
+        assert_eq!(event.contexts.len(), 5);
         assert!(
             event
                 .contexts
                 .iter()
                 .all(|context| context.version == Some(1))
         );
+    }
+
+    #[test]
+    fn accepts_bounded_future_names_and_selector_versions() {
+        let event = validate(json!([
+            {
+                "type": "invocation",
+                "status": "present",
+                "data": {
+                    "intent": "command",
+                    "arguments": [
+                        {"name": "future-flag", "kind": "text"},
+                        {"name": "arg-12", "kind": "text"},
+                        {"name": "core", "kind": "selector", "value": "snapshot"},
+                        {"name": "loader", "kind": "selector", "value": "fabric@0.16.9"},
+                        {"name": "minecraft", "kind": "version", "value": "25w45a"}
+                    ]
+                }
+            },
+            {
+                "type": "execution",
+                "status": "present",
+                "data": {
+                    "phases": [
+                        {"name": "future_phase", "elapsed_ms": 604800000, "state": "complete"},
+                        {"name": "install-phase-2", "elapsed_ms": 0, "state": "active"}
+                    ],
+                    "active_phase": "install-phase-2",
+                    "input_wait_ms": 604800000,
+                    "files": 1000000
+                }
+            }
+        ]))
+        .unwrap();
+        assert_eq!(event.contexts.len(), 2);
     }
 
     #[test]
@@ -998,184 +935,225 @@ mod tests {
     #[test]
     fn rejects_unknown_or_arbitrary_values() {
         for contexts in [
-            json!([{"type": "invocation", "status": "present", "data": {"intent": "command", "output": "text", "offline": false, "argv": ["x"]}}]),
-            json!([{"type": "invocation", "status": "present", "data": {"intent": "command", "output": "text", "offline": false, "flags": [{"name": "argv", "kind": "text"}]}}]),
-            json!([{"type": "invocation", "status": "present", "data": {"intent": "command", "output": "yaml", "offline": false}}]),
-            json!([{"type": "execution", "status": "present", "data": {"slow": false, "phases": [{"name": "bogus", "elapsed_ms": 1, "state": "complete"}]}}]),
-            json!([{"type": "execution", "status": "present", "data": {"slow": false, "active_phase": "bogus"}}]),
-            json!([{"type": "execution", "status": "present", "data": {"slow": false, "cancel_reason": "timeout"}}]),
-            json!([{"type": "execution", "status": "present", "data": {"slow": false, "failure_kind": "unexpected"}}]),
-            json!([{"type": "prompt", "status": "present", "data": {"mode": "maybe", "count": 0, "wait_ms": 0, "aborted": false}}]),
-            json!([{"type": "prompt", "status": "present", "data": {"mode": "available", "count": 0, "wait_ms": 0, "aborted": false, "interrupted": "yes"}}]),
-            json!([{"type": "prompt", "status": "present", "data": {"mode": "available", "count": 0, "wait_ms": 0, "aborted": false, "interrupted": null}}]),
-        ] {
-            assert!(validate(contexts).is_err());
-        }
-    }
-
-    #[test]
-    fn rejects_out_of_range_observations() {
-        for contexts in [
-            json!([{"type": "invocation", "status": "present", "data": {"intent": "command", "output": "text", "offline": false, "positionals": 10001}}]),
-            json!([{"type": "invocation", "status": "present", "data": {"intent": "command", "output": "text", "offline": false, "positionals": -1}}]),
-            json!([{"type": "execution", "status": "present", "data": {"slow": false, "phases": [{"name": "setup", "elapsed_ms": 604800001, "state": "complete"}]}}]),
-            json!([{"type": "execution", "status": "present", "data": {"slow": false, "http_ms": 604800001}}]),
-            json!([{"type": "execution", "status": "present", "data": {"slow": false, "lock_ms": 604800001}}]),
-            json!([{"type": "prompt", "status": "present", "data": {"mode": "available", "count": 10001, "wait_ms": 0, "aborted": false}}]),
-            json!([{"type": "prompt", "status": "present", "data": {"mode": "available", "count": 0, "wait_ms": 604800001, "aborted": false}}]),
-            json!([{"type": "scale", "status": "present", "data": {"packages": 1000001}}]),
-            json!([{"type": "warnings", "status": "present", "data": {"recoverable": 10001}}]),
-        ] {
-            assert!(validate(contexts).is_err());
-        }
-    }
-
-    #[test]
-    fn rejects_more_than_24_phases() {
-        let phases: Vec<Value> = (0..25)
-            .map(|_| json!({"name": "setup", "elapsed_ms": 1, "state": "complete"}))
-            .collect();
-        assert!(
-            validate(json!([{
-                "type": "execution",
-                "status": "present",
-                "data": {"slow": false, "phases": phases}
-            }]))
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn rejects_more_flags_than_the_allowlist() {
-        let flags: Vec<Value> = (0..32)
-            .map(|_| json!({"name": "offline", "kind": "boolean"}))
-            .collect();
-        assert!(
-            validate(json!([{
-                "type": "invocation",
-                "status": "present",
-                "data": {
-                    "intent": "command",
-                    "output": "text",
-                    "offline": false,
-                    "flags": flags
-                }
-            }]))
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn rejects_envelope_violations() {
-        for contexts in [
-            json!([{"type": "invocation", "status": "present", "version": 2, "data": {"intent": "command", "output": "text", "offline": false}}]),
-            json!([{"type": "invocation", "status": "present", "reason": "no_result", "data": {"intent": "command", "output": "text", "offline": false}}]),
-            json!([{"type": "invocation", "status": "absent", "reason": "observation_failed"}]),
-            json!([{"type": "invocation", "status": "failed", "reason": "no_result"}]),
-            json!([{"type": "invocation", "status": "absent", "data": {"offline": false}}]),
-            json!([{"type": "transport", "status": "present", "data": {"queue_ms": 1, "attempts": 1, "throttles": 0}}]),
-            json!([{"type": "invocation", "status": "present", "data": {"intent": "command", "output": "text", "offline": false, "extra": null}}]),
-        ] {
-            assert!(validate(contexts).is_err());
-        }
-    }
-
-    #[test]
-    fn injects_transport_from_upload() {
-        let upload = UploadInput {
-            queue_ms: 1200,
-            attempts: 2,
-            throttles: 1,
-        };
-        let event = validate_with_upload(
-            json!([{"type": "collection", "status": "present", "data": {"local_log": true}}]),
-            &Config::default(),
-            &upload,
-        )
-        .unwrap();
-        assert_eq!(event.contexts.len(), 2);
-        let transport = event.contexts.last().unwrap();
-        assert_eq!(transport.context_type, "transport");
-        assert_eq!(transport.status, "present");
-        assert_eq!(transport.version, Some(1));
-        assert_eq!(
-            transport.data,
-            Some(json!({"queue_ms": 1200, "attempts": 2, "throttles": 1}))
-        );
-    }
-
-    #[test]
-    fn rejects_upload_out_of_range() {
-        for upload in [
-            UploadInput {
-                queue_ms: -1,
-                attempts: 1,
-                throttles: 0,
-            },
-            UploadInput {
-                queue_ms: 604800001,
-                attempts: 1,
-                throttles: 0,
-            },
-            UploadInput {
-                queue_ms: 0,
-                attempts: 0,
-                throttles: 0,
-            },
-            UploadInput {
-                queue_ms: 0,
-                attempts: 1,
-                throttles: 10001,
-            },
+            invocation(json!({"intent": "command", "output": "text"})),
+            invocation(json!({"intent": "command", "offline": false})),
+            invocation(json!({"intent": "command", "argv": ["x"]})),
+            invocation(json!({"intent": "bash"})),
+            invocation(
+                json!({"intent": "command", "arguments": [{"name": "arg/v", "kind": "text"}]}),
+            ),
+            invocation(
+                json!({"intent": "command", "arguments": [{"name": "flag", "kind": "yaml"}]}),
+            ),
+            invocation(
+                json!({"intent": "command", "arguments": [{"name": "flag", "kind": "text", "value": "secret"}]}),
+            ),
+            invocation(
+                json!({"intent": "command", "arguments": [{"name": "flag", "kind": "list", "value": ["a"]}]}),
+            ),
+            invocation(
+                json!({"intent": "command", "arguments": [{"name": "flag", "kind": "boolean", "value": "yes"}]}),
+            ),
+            invocation(
+                json!({"intent": "command", "arguments": [{"name": "flag", "kind": "number", "value": "1"}]}),
+            ),
+            invocation(
+                json!({"intent": "command", "arguments": [{"name": "flag", "kind": "selector", "value": "custom"}]}),
+            ),
+            invocation(
+                json!({"intent": "command", "arguments": [{"name": "flag", "kind": "selector", "value": "paper@latest"}]}),
+            ),
+            invocation(
+                json!({"intent": "command", "arguments": [{"name": "flag", "kind": "selector", "value": "paper@1.2.3.4.5"}]}),
+            ),
+            invocation(
+                json!({"intent": "command", "arguments": [{"name": "flag", "kind": "version", "value": "../../etc"}]}),
+            ),
+            execution(
+                json!({"phases": [{"name": "bad name", "elapsed_ms": 1, "state": "complete"}]}),
+            ),
+            execution(json!({"active_phase": "Bad"})),
+            execution(json!({"cancel_reason": "timeout"})),
+            execution(json!({"failure_kind": "unexpected"})),
+            execution(json!({"slow": false})),
         ] {
             assert!(
-                validate_with_upload(json!([]), &Config::default(), &upload).is_err(),
-                "upload {upload:?} must be rejected"
+                validate(contexts.clone()).is_err(),
+                "case must be rejected: {contexts}"
             );
         }
     }
 
     #[test]
-    fn upload_rejects_unknown_or_missing_fields() {
+    fn rejects_retired_contexts() {
+        for kind in [
+            "mystery",
+            "prompt",
+            "scale",
+            "warnings",
+            "collection",
+            "transport",
+        ] {
+            assert!(
+                validate(json!([{"type": kind, "status": "absent"}])).is_err(),
+                "{kind} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_out_of_range_observations() {
+        let long_argument = "a".repeat(MAX_ARGUMENT_NAME + 1);
+        let long_phase = "a".repeat(65);
+        for contexts in [
+            invocation(
+                json!({"intent": "command", "arguments": [{"name": long_argument, "kind": "text"}]}),
+            ),
+            invocation(
+                json!({"intent": "command", "arguments": [{"name": "flag", "kind": "number", "value": 9007199254740992i64}]}),
+            ),
+            invocation(
+                json!({"intent": "command", "arguments": [{"name": "flag", "kind": "number", "value": -9007199254740992i64}]}),
+            ),
+            execution(
+                json!({"phases": [{"name": long_phase, "elapsed_ms": 1, "state": "complete"}]}),
+            ),
+            execution(
+                json!({"phases": [{"name": "setup", "elapsed_ms": 604800001, "state": "complete"}]}),
+            ),
+            execution(json!({"input_wait_ms": 604800001})),
+            execution(json!({"files": 1000001})),
+            execution(json!({"http_ms": 604800001})),
+            execution(json!({"lock_ms": 604800001})),
+            json!([{"type": "workspace", "status": "present", "data": {"packages": 1000001}}]),
+            json!([{"type": "java", "status": "present", "data": {"major": 256}}]),
+        ] {
+            assert!(validate(contexts).is_err());
+        }
+    }
+
+    #[test]
+    fn rejects_duplicate_and_malformed_argument_names() {
+        for arguments in [
+            json!([
+                {"name": "json", "kind": "boolean", "value": true},
+                {"name": "json", "kind": "text"}
+            ]),
+            json!([
+                {"name": "arg-1", "kind": "text"},
+                {"name": "arg-1", "kind": "text"}
+            ]),
+        ] {
+            assert!(
+                validate(invocation(
+                    json!({"intent": "command", "arguments": arguments})
+                ))
+                .is_err()
+            );
+        }
+
+        for arguments in [
+            json!([{"name": "arg-0", "kind": "text"}]),
+            json!([{"name": "arg-01", "kind": "text"}]),
+            json!([{"name": "arg-", "kind": "text"}]),
+            json!([{"name": "-flag", "kind": "text"}]),
+            json!([{"name": "Flag", "kind": "text"}]),
+            json!([{"name": "flag_name", "kind": "text"}]),
+        ] {
+            assert!(
+                validate(invocation(
+                    json!({"intent": "command", "arguments": arguments})
+                ))
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_at_most_32_arguments() {
+        let arguments: Vec<Value> = (0..MAX_ARGUMENTS)
+            .map(|index| json!({"name": format!("flag-{index}"), "kind": "text"}))
+            .collect();
         assert!(
-            serde_json::from_value::<UploadInput>(
-                json!({"queue_ms": 1, "attempts": 1, "throttles": 0, "url": "x"})
-            )
+            validate(invocation(
+                json!({"intent": "command", "arguments": arguments})
+            ))
+            .is_ok()
+        );
+
+        let arguments: Vec<Value> = (0..MAX_ARGUMENTS + 1)
+            .map(|index| json!({"name": format!("flag-{index}"), "kind": "text"}))
+            .collect();
+        assert!(
+            validate(invocation(
+                json!({"intent": "command", "arguments": arguments})
+            ))
             .is_err()
         );
-        assert!(
-            serde_json::from_value::<UploadInput>(json!({"queue_ms": 1, "attempts": 1})).is_err()
-        );
     }
 
     #[test]
-    fn enforces_total_context_limit_with_transport() {
-        let cfg = Config {
-            max_contexts: 2,
-            ..Default::default()
-        };
-        let upload = UploadInput {
-            queue_ms: 0,
-            attempts: 1,
-            throttles: 0,
-        };
-        let two_contexts = json!([
-            {"type": "collection", "status": "present", "data": {"local_log": true}},
-            {"type": "scale", "status": "present", "data": {"packages": 1}}
-        ]);
-        assert!(validate_with_upload(two_contexts, &cfg, &upload).is_err());
-
-        let event = validate_with_upload(
-            json!([{"type": "collection", "status": "present", "data": {"local_log": true}}]),
-            &cfg,
-            &upload,
-        )
-        .unwrap();
-        assert_eq!(event.contexts.len(), 2);
+    fn rejects_more_than_24_phases() {
+        let phases: Vec<Value> = (0..MAX_PHASES + 1)
+            .map(|_| json!({"name": "setup", "elapsed_ms": 1, "state": "complete"}))
+            .collect();
+        assert!(validate(execution(json!({"phases": phases}))).is_err());
     }
 
     #[test]
-    fn legacy_contexts_keep_their_shape() {
+    fn rejects_envelope_violations() {
+        for contexts in [
+            json!([{"type": "invocation", "status": "present", "version": 2, "data": {"intent": "command"}}]),
+            json!([{"type": "invocation", "status": "present", "reason": "no_result", "data": {"intent": "command"}}]),
+            json!([{"type": "invocation", "status": "absent", "reason": "observation_failed"}]),
+            json!([{"type": "invocation", "status": "failed", "reason": "no_result"}]),
+            json!([{"type": "invocation", "status": "absent", "data": {"intent": "command"}}]),
+            json!([{"type": "transport", "status": "present", "data": {"queue_ms": 1}}]),
+            invocation(json!({"intent": "command", "extra": null})),
+            execution(json!({"input_wait_ms": null})),
+        ] {
+            assert!(validate(contexts).is_err());
+        }
+    }
+
+    #[test]
+    fn event_requires_operation_and_rejects_removed_fields() {
+        let mut payload = event_payload(json!([]));
+        payload["collection_policy"] = json!("default");
+        assert!(validate_event(ID, &payload, &Config::default(), RECEIVED_AT, 1).is_err());
+
+        let mut payload = event_payload(json!([]));
+        let operation = payload["operation"].clone();
+        let _ = payload.as_object_mut().unwrap().remove("operation");
+        payload["command"] = operation;
+        assert!(validate_event(ID, &payload, &Config::default(), RECEIVED_AT, 1).is_err());
+    }
+
+    #[test]
+    fn report_drops_collection_policy_and_scrubs_body() {
+        let report_payload = || {
+            json!({
+                "report_id": ID,
+                "installation_id": "33333333-3333-4333-8333-333333333333",
+                "kind": "failure",
+                "created_at": Utc::now().to_rfc3339(),
+                "schema_version": 1,
+                "body": "panic: token=hunter2 at /Users/me/app.log",
+            })
+        };
+
+        let report = validate_report(ID, &report_payload(), &Config::default()).unwrap();
+        assert!(!report.body.contains("hunter2"));
+        assert!(report.body.contains("[redacted]"));
+        assert!(report.body.contains("[redacted-path]"));
+
+        let mut payload = report_payload();
+        payload["collection_policy"] = json!("default");
+        assert!(validate_report(ID, &payload, &Config::default()).is_err());
+    }
+
+    #[test]
+    fn observation_contexts_keep_their_shape() {
         let event = validate(json!([
             {"type": "workspace", "status": "present", "data": {"product": "paper", "product_version": "1.20.4", "packages": 7}},
             {"type": "java", "status": "absent"},
@@ -1204,5 +1182,11 @@ mod tests {
         });
         let record: ContextRecord = serde_json::from_value(present.clone()).unwrap();
         assert_eq!(serde_json::to_value(&record).unwrap(), present);
+    }
+
+    #[test]
+    fn stored_event_operation_replaces_command() {
+        let event = validate(json!([])).unwrap();
+        assert_eq!(event.operation, "lucy install");
     }
 }

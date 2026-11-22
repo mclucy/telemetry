@@ -5,10 +5,10 @@ pub const MAX_QUEUE_DELIVERY_DAYS: i64 = 14;
 
 pub const INSERT_EVENT: &str = "\
 INSERT INTO events (
-    id, installation_id, invocation_id, occurred_at, received_at, command,
+    id, installation_id, invocation_id, occurred_at, received_at, operation,
     lucy_version, lucy_commit, channel, os, arch, duration_ms, outcome,
-    error_code, schema_version, collection_policy, payload_bytes, ingest_digest
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    error_code, schema_version, payload_bytes, ingest_digest
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO NOTHING";
 
 /// A conflicting duplicate event cannot change its accepted contexts.
@@ -52,10 +52,10 @@ SELECT COUNT(*) AS expired FROM (
 pub const INSERT_REPORT_PENDING: &str = "\
 INSERT INTO reports (
     id, installation_id, invocation_id, kind, agent, model, created_at,
-    received_at, schema_version, collection_policy, r2_key, body_bytes,
+    received_at, schema_version, r2_key, body_bytes,
     body_sha256, payload_bytes, state
 )
-SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending'
+SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending'
 WHERE NOT EXISTS (SELECT 1 FROM report_tombstones WHERE id = ?)
 ON CONFLICT(id) DO NOTHING";
 
@@ -63,10 +63,10 @@ ON CONFLICT(id) DO NOTHING";
 pub const INSERT_REPORT_STORED: &str = "\
 INSERT INTO reports (
     id, installation_id, invocation_id, kind, agent, model, created_at,
-    received_at, schema_version, collection_policy, r2_key, body_bytes,
+    received_at, schema_version, r2_key, body_bytes,
     body_sha256, payload_bytes, state, stored_at
 )
-SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'stored', ?
+SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'stored', ?
 WHERE NOT EXISTS (SELECT 1 FROM report_tombstones WHERE id = ?)
 ON CONFLICT(id) DO UPDATE SET
     state = 'stored',

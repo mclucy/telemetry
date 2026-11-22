@@ -9,7 +9,7 @@ use worker::{
     wasm_bindgen::JsValue,
 };
 
-use crate::config::Config;
+use crate::config::{Config, PENDING_REPORT_GRACE_HOURS};
 use crate::models::{QueueMessage, ReportRecord, ValidatedReport, validate_event, validate_report};
 use crate::sql;
 use crate::util;
@@ -178,14 +178,7 @@ pub async fn handle(request: &mut Request, env: &Env) -> worker::Result<Response
 
         match raw.record_type.as_str() {
             "event" => {
-                match validate_event(
-                    &raw.id,
-                    &raw.payload,
-                    &config,
-                    &received_at,
-                    payload_bytes,
-                    raw.upload.as_ref(),
-                ) {
+                match validate_event(&raw.id, &raw.payload, &config, &received_at, payload_bytes) {
                     Ok(event) => {
                         let message = QueueMessage::Event {
                             v: QueueMessage::VERSION,
@@ -299,7 +292,7 @@ pub async fn handle(request: &mut Request, env: &Env) -> worker::Result<Response
                     prepared.push(Prepared { id, message });
                 }
                 Candidate::Report(candidate) => {
-                    match store_report(env, &config, &candidate.report, &candidate.record).await {
+                    match store_report(env, &candidate.report, &candidate.record).await {
                         Ok(StoreOutcome::Queued) => {
                             let id = candidate.record.report_id.clone();
                             prepared.push(Prepared {
@@ -410,7 +403,6 @@ fn prepare_report_record(
         created_at: report.created_at.clone(),
         received_at: received_at.to_string(),
         schema_version: report.schema_version,
-        collection_policy: report.collection_policy.clone(),
         r2_key,
         body_bytes,
         body_sha256,
@@ -500,15 +492,14 @@ async fn record_limited_attempt(
     }
 }
 
-fn report_age_exceeds(retention_days: i64, received_at: &str) -> bool {
+fn report_age_exceeds(hours: i64, received_at: &str) -> bool {
     DateTime::parse_from_rfc3339(received_at)
-        .map(|parsed| Utc::now() - parsed.with_timezone(&Utc) > TimeDelta::days(retention_days))
+        .map(|parsed| Utc::now() - parsed.with_timezone(&Utc) > TimeDelta::hours(hours))
         .unwrap_or(false)
 }
 
 async fn store_report(
     env: &Env,
-    config: &Config,
     report: &ValidatedReport,
     record: &ReportRecord,
 ) -> std::result::Result<StoreOutcome, StoreError> {
@@ -527,11 +518,11 @@ async fn store_report(
             "pending" => {
                 if existing.body_sha256 != record.body_sha256
                     || existing.r2_key != record.r2_key
-                    || report_age_exceeds(config.report_retention_days, &existing.received_at)
+                    || report_age_exceeds(PENDING_REPORT_GRACE_HOURS, &existing.received_at)
                 {
                     Err(StoreError::Conflict)
                 } else {
-                    write_pending_report(env, config, &database, report, record).await
+                    write_pending_report(env, &database, report, record).await
                 }
             }
             "deleting" => Err(StoreError::Conflict),
@@ -545,12 +536,11 @@ async fn store_report(
         return Err(StoreError::Conflict);
     }
 
-    write_pending_report(env, config, &database, report, record).await
+    write_pending_report(env, &database, report, record).await
 }
 
 async fn write_pending_report(
     env: &Env,
-    config: &Config,
     database: &worker::D1Database,
     report: &ValidatedReport,
     record: &ReportRecord,
@@ -597,7 +587,6 @@ async fn write_pending_report(
             util::js_str(&record.created_at),
             util::js_str(&record.received_at),
             util::js_num(record.schema_version),
-            util::js_str(&record.collection_policy),
             util::js_str(&record.r2_key),
             util::js_num(record.body_bytes),
             util::js_str(&record.body_sha256),
@@ -641,7 +630,7 @@ async fn write_pending_report(
             "pending"
                 if existing.body_sha256 == record.body_sha256
                     && existing.r2_key == record.r2_key
-                    && !report_age_exceeds(config.report_retention_days, &existing.received_at) =>
+                    && !report_age_exceeds(PENDING_REPORT_GRACE_HOURS, &existing.received_at) =>
             {
                 Ok(StoreOutcome::Queued)
             }

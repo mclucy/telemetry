@@ -7,12 +7,24 @@ pub const DEFAULT_MAX_RECORD_BYTES: usize = 96 * 1024;
 pub const DEFAULT_MAX_REPORT_BODY_BYTES: usize = 64 * 1024;
 pub const DEFAULT_MAX_CONTEXT_BYTES: usize = 8 * 1024;
 pub const DEFAULT_MAX_CONTEXTS: usize = 16;
-pub const DEFAULT_EVENT_RETENTION_DAYS: i64 = 30;
-pub const DEFAULT_REPORT_RETENTION_DAYS: i64 = 14;
-pub const MAX_EVENT_RETENTION_DAYS: i64 = 30;
-pub const MAX_REPORT_RETENTION_DAYS: i64 = 14;
-pub const DEFAULT_PENDING_REPORT_GRACE_HOURS: i64 = DEFAULT_REPORT_RETENTION_DAYS * 24;
-pub const MAX_PENDING_REPORT_GRACE_HOURS: i64 = MAX_REPORT_RETENTION_DAYS * 24;
+
+/// One receipt-based privacy horizon for every stored record class. Events,
+/// their context snapshots, and report bodies share it; it is not configurable.
+pub const RECORD_RETENTION_DAYS: i64 = 30;
+
+/// How long a `pending` report waits for its queue delivery before cleanup
+/// deletes it. A delayed message can verify the row only inside the queue's
+/// maximum delivery window, and the body never outlives the record horizon.
+pub const PENDING_REPORT_GRACE_HOURS: i64 = {
+    let delivery_hours = crate::sql::MAX_QUEUE_DELIVERY_DAYS * 24;
+    let lifetime_hours = RECORD_RETENTION_DAYS * 24;
+    if delivery_hours < lifetime_hours {
+        delivery_hours
+    } else {
+        lifetime_hours
+    }
+};
+
 pub const DEFAULT_CLEANUP_BATCH_SIZE: usize = 100;
 pub const DEFAULT_CLEANUP_MAX_BATCHES: usize = 10;
 pub const DEFAULT_MAX_CLOCK_SKEW_SECONDS: i64 = 7 * 24 * 60 * 60;
@@ -30,9 +42,6 @@ pub struct Config {
     pub max_report_body_bytes: usize,
     pub max_context_bytes: usize,
     pub max_contexts: usize,
-    pub event_retention_days: i64,
-    pub report_retention_days: i64,
-    pub pending_report_grace_hours: i64,
     pub cleanup_batch_size: usize,
     pub cleanup_max_batches: usize,
     pub max_clock_skew_seconds: i64,
@@ -48,9 +57,6 @@ impl Default for Config {
             max_report_body_bytes: DEFAULT_MAX_REPORT_BODY_BYTES,
             max_context_bytes: DEFAULT_MAX_CONTEXT_BYTES,
             max_contexts: DEFAULT_MAX_CONTEXTS,
-            event_retention_days: DEFAULT_EVENT_RETENTION_DAYS,
-            report_retention_days: DEFAULT_REPORT_RETENTION_DAYS,
-            pending_report_grace_hours: DEFAULT_PENDING_REPORT_GRACE_HOURS,
             cleanup_batch_size: DEFAULT_CLEANUP_BATCH_SIZE,
             cleanup_max_batches: DEFAULT_CLEANUP_MAX_BATCHES,
             max_clock_skew_seconds: DEFAULT_MAX_CLOCK_SKEW_SECONDS,
@@ -98,18 +104,6 @@ impl Config {
         }
         if !(1..=32).contains(&self.max_contexts) {
             return fail("max_contexts must be 1..=32");
-        }
-        if !(1..=MAX_EVENT_RETENTION_DAYS).contains(&self.event_retention_days) {
-            return fail("event_retention_days must be 1..=30");
-        }
-        if !(1..=MAX_REPORT_RETENTION_DAYS).contains(&self.report_retention_days) {
-            return fail("report_retention_days must be 1..=14");
-        }
-        if !(1..=MAX_PENDING_REPORT_GRACE_HOURS).contains(&self.pending_report_grace_hours) {
-            return fail("pending_report_grace_hours must be 1..=336");
-        }
-        if self.pending_report_grace_hours != self.report_retention_days * 24 {
-            return fail("pending_report_grace_hours must equal report_retention_days * 24");
         }
         if !(1..=500).contains(&self.cleanup_batch_size) {
             return fail("cleanup_batch_size must be 1..=500");
