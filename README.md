@@ -284,7 +284,7 @@ Deploys carry no secrets: the Worker has no secret bindings, so `pnpm deploy` up
 
 CI runs in GitHub Actions (`.github/workflows/deploy.yml`). Pull requests build the Worker and run a deploy dry run; pushes to `main` deploy the prebuilt Build Output. The workflow installs Rust, caches `~/.cargo` and `target/`, runs `pnpm build` (which matches `worker-build` to the locked `worker` crate), and deploys the result with `--prebuilt`.
 
-Apply D1 migrations before deploying code that uses the new schema. `migrations/0003_operation_evidence.sql` renames stored `events.command` values to `operation` and removes the redundant stored evidence (`collection_policy`, the prompt/scale/warnings/collection/transport contexts, derived `execution.slow`, and obsolete invocation output/offline flags). It preserves the remaining historical rows, which expire on the same receipt-based horizon.
+Run `pnpm migrate` before deploying the Worker. The consolidated baseline initializes a new D1 database. Use an empty database for this cutover: applying the baseline to a database with `events.command` fails without modifying its telemetry.
 
 This release is a breaking wire cutover, not a dual-protocol rollover. The Worker accepts only the new payload (`operation`, structured invocation arguments, no `collection_policy` or `upload`, and only the retained contexts); it has no shim for the old shape. Released alpha.9 clients still send the legacy format, so their uploads are rejected until they upgrade. Do not treat a production deploy as a safe live cutover: sequence the migration, Worker, dashboard, and client release, and expect an intake gap from clients that have not upgraded.
 
